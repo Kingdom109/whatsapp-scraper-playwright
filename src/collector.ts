@@ -106,16 +106,15 @@ export function collectMessages(
       ];
 
   if (limit.kind === "messages") {
-    const messages = sorted.slice(-limit.value);
-    const uncertain = messages.filter(
+    const uncertain = sorted.filter(
       ({ timestamp }) => timestampMillis(timestamp) === null,
     ).length;
     if (uncertain > 0) {
       warnings.push(
-        `Retained ${uncertain} message(s) with incomplete or invalid timestamps; chronological ordering is uncertain.`,
+        `Found ${uncertain} message(s) with incomplete or invalid timestamps; newest-message selection and chronological ordering may be incomplete.`,
       );
     }
-    return { messages, warnings };
+    return { messages: sorted.slice(-limit.value), warnings };
   }
 
   const cutoff = localCalendarCutoff(now, limit.value).getTime();

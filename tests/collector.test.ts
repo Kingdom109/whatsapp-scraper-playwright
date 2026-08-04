@@ -197,7 +197,24 @@ describe("collectMessages", () => {
       "new",
     ]);
     expect(result.warnings).toEqual([
-      "Retained 1 message(s) with incomplete or invalid timestamps; chronological ordering is uncertain.",
+      "Found 1 message(s) with incomplete or invalid timestamps; newest-message selection and chronological ordering may be incomplete.",
+    ]);
+  });
+
+  it("warns when an uncertain timestamp is omitted from newest-message selection", () => {
+    const result = collectMessages(
+      [[
+        message("invalid", null),
+        message("old", "2026-08-04T08:00:00+03:00"),
+        message("new", "2026-08-04T10:00:00+03:00"),
+      ]],
+      { kind: "messages", value: 2 },
+      new Date("2026-08-04T12:00:00+03:00"),
+    );
+
+    expect(result.messages.map(({ id }) => id)).toEqual(["old", "new"]);
+    expect(result.warnings).toEqual([
+      "Found 1 message(s) with incomplete or invalid timestamps; newest-message selection and chronological ordering may be incomplete.",
     ]);
   });
 
