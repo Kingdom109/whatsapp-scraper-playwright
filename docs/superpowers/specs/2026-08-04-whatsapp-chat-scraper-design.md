@@ -101,7 +101,7 @@ Each collection cycle:
 4. Waits for either newly rendered messages or a bounded timeout.
 5. Repeats until the requested boundary or a safety condition is reached.
 
-For `--days N`, the collector calculates the cutoff in the computer's local timezone, continues until it has observed messages older than that cutoff, and then filters the final collection precisely.
+For `--days N`, the collector uses inclusive local calendar days: `--days 1` means messages since local midnight today, while `--days 3` means today and the two preceding local calendar days. It continues until it has observed messages older than that cutoff, then filters the final collection precisely.
 
 For `--messages N`, the collector continues until it has at least `N` unique messages, then retains the newest `N` in chronological order.
 
