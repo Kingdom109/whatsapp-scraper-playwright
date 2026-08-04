@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const CLI_NAME = "whatsapp-scrape";
 
@@ -9,7 +10,7 @@ const invokedPath = process.argv[1];
 
 if (
   invokedPath !== undefined &&
-  import.meta.url === pathToFileURL(resolve(invokedPath)).href
+  realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(invokedPath))
 ) {
   process.stdout.write(`${CLI_NAME}\n`);
 }
