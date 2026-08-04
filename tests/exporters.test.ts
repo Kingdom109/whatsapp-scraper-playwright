@@ -180,4 +180,16 @@ describe("writeExport", () => {
     expect(JSON.parse(await readFile(path, "utf8")).chat).toBe(chat);
     expect(input).toEqual(before);
   });
+
+  it("uses a bounded canonical timestamp in the filename without changing extractedAt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "wa-export-stamp-"));
+    const extractedAt = `Tue, 04 Aug 2026 18:30:00 GMT (${"a".repeat(300)})`;
+    expect(Number.isFinite(Date.parse(extractedAt))).toBe(true);
+    const input = result({ extractedAt });
+
+    const path = await writeExport(input, "json", directory);
+
+    expect(basename(path).length).toBeLessThan(150);
+    expect(JSON.parse(await readFile(path, "utf8")).extractedAt).toBe(extractedAt);
+  });
 });

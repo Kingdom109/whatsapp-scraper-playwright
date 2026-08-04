@@ -73,7 +73,7 @@ function assertMessage(value: unknown, index: number): void {
 function assertExportDocument(value: unknown): asserts value is ExtractionResult {
   if (!isRecord(value)) invalid("document must be an object");
   if (typeof value.chat !== "string" || value.chat.trim() === "") invalid("chat must be nonblank");
-  if (typeof value.extractedAt !== "string" || !Number.isFinite(Date.parse(value.extractedAt))) {
+  if (typeof value.extractedAt !== "string" || !Number.isFinite(new Date(value.extractedAt).getTime())) {
     invalid("extractedAt must be a valid date-time string");
   }
   if (!isRecord(value.request) ||
@@ -178,7 +178,8 @@ export async function writeExport(
   if (format !== "md" && format !== "json") throw new Error(`Unsupported export format: ${String(format)}`);
 
   const body = format === "md" ? renderMarkdown(result) : `${JSON.stringify(result, null, 2)}\n`;
-  const base = `${safeChatName(result.chat)}-${safeTimestamp(result.extractedAt)}`;
+  const canonicalTimestamp = new Date(result.extractedAt).toISOString();
+  const base = `${safeChatName(result.chat)}-${safeTimestamp(canonicalTimestamp)}`;
   await mkdir(directory, { recursive: true });
   const temporaryPath = join(directory, `.${base}.${process.pid}.${randomUUID()}.tmp`);
   let handle;
