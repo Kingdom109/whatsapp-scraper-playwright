@@ -7,6 +7,12 @@ function requirePositiveInteger(value: number, label: "days" | "messages"): void
   }
 }
 
+function timestampMillis(timestamp: string | null): number | null {
+  if (timestamp === null) return null;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function fallbackMessageId(
   chat: string,
   record: Omit<MessageRecord, "id">,
@@ -52,17 +58,17 @@ export function boundaryReached(
 ): boolean {
   requirePositiveInteger(limit.value, limit.kind);
 
+  const byId = new Map<string, MessageRecord>();
+  for (const record of records) byId.set(record.id, record);
+
   if (limit.kind === "messages") {
-    const uniqueIds = new Set<string>();
-    for (const record of records) uniqueIds.add(record.id);
-    return uniqueIds.size >= limit.value;
+    return byId.size >= limit.value;
   }
 
   const cutoff = localCalendarCutoff(now, limit.value).getTime();
-  for (const record of records) {
-    if (record.timestamp !== null && Date.parse(record.timestamp) < cutoff) {
-      return true;
-    }
+  for (const record of byId.values()) {
+    const timestamp = timestampMillis(record.timestamp);
+    if (timestamp !== null && timestamp < cutoff) return true;
   }
   return false;
 }
@@ -75,32 +81,58 @@ export function collectMessages(
   requirePositiveInteger(limit.value, limit.kind);
 
   const byId = new Map<string, MessageRecord>();
+  let fallbackCollisions = 0;
   for (const window of windows) {
-    for (const record of window) byId.set(record.id, record);
+    const fallbackIdsInWindow = new Set<string>();
+    for (const record of window) {
+      if (/^[0-9a-f]{24}$/.test(record.id)) {
+        if (fallbackIdsInWindow.has(record.id)) fallbackCollisions += 1;
+        fallbackIdsInWindow.add(record.id);
+      }
+      byId.set(record.id, record);
+    }
   }
 
   const sorted = [...byId.values()].sort((left, right) => {
-    const leftTime = left.timestamp === null ? Number.NEGATIVE_INFINITY : Date.parse(left.timestamp);
-    const rightTime = right.timestamp === null ? Number.NEGATIVE_INFINITY : Date.parse(right.timestamp);
-    return leftTime - rightTime;
+    const leftTime = timestampMillis(left.timestamp);
+    const rightTime = timestampMillis(right.timestamp);
+    return (leftTime ?? Number.NEGATIVE_INFINITY) - (rightTime ?? Number.NEGATIVE_INFINITY);
   });
 
+  const warnings = fallbackCollisions === 0
+    ? []
+    : [
+        `Detected ${fallbackCollisions} ambiguous fallback message ID collision(s) within a single window.`,
+      ];
+
   if (limit.kind === "messages") {
-    return { messages: sorted.slice(-limit.value), warnings: [] };
+    const messages = sorted.slice(-limit.value);
+    const uncertain = messages.filter(
+      ({ timestamp }) => timestampMillis(timestamp) === null,
+    ).length;
+    if (uncertain > 0) {
+      warnings.push(
+        `Retained ${uncertain} message(s) with incomplete or invalid timestamps; chronological ordering is uncertain.`,
+      );
+    }
+    return { messages, warnings };
   }
 
   const cutoff = localCalendarCutoff(now, limit.value).getTime();
-  const messages = sorted.filter(
-    ({ timestamp }) => timestamp !== null && Date.parse(timestamp) >= cutoff,
-  );
-  const missing = sorted.filter(({ timestamp }) => timestamp === null).length;
+  const messages = sorted.filter(({ timestamp }) => {
+    const parsed = timestampMillis(timestamp);
+    return parsed !== null && parsed >= cutoff;
+  });
+  const missing = sorted.filter(
+    ({ timestamp }) => timestampMillis(timestamp) === null,
+  ).length;
+  if (missing > 0) {
+    warnings.push(
+      `Excluded ${missing} message(s) with incomplete or invalid timestamps from the day boundary.`,
+    );
+  }
   return {
     messages,
-    warnings:
-      missing === 0
-        ? []
-        : [
-            `Excluded ${missing} message(s) with incomplete timestamps from the day boundary.`,
-          ],
+    warnings,
   };
 }

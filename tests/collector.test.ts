@@ -123,6 +123,16 @@ describe("boundaryReached", () => {
     ).toBe(true);
   });
 
+  it("uses the latest duplicate when deciding whether a day boundary was reached", () => {
+    const now = new Date(2026, 7, 4, 12, 0, 0);
+    const records = [
+      message("same", new Date(2026, 7, 1, 23, 59, 59).toISOString()),
+      message("same", new Date(2026, 7, 3, 9, 0, 0).toISOString()),
+    ];
+
+    expect(boundaryReached(records, { kind: "days", value: 3 }, now)).toBe(false);
+  });
+
   it("rejects invalid limits even when CLI validation is bypassed", () => {
     expect(() =>
       boundaryReached([], { kind: "messages", value: 0 }, new Date()),
@@ -168,6 +178,29 @@ describe("collectMessages", () => {
     expect(result.messages.map(({ id }) => id)).toEqual(["b", "c"]);
   });
 
+  it("keeps malformed timestamps without disrupting valid chronological order for count limits", () => {
+    const result = collectMessages(
+      [[
+        message("new", "2026-08-04T10:00:00+03:00"),
+        message("invalid", "not-a-timestamp"),
+        message("old", "2026-08-04T08:00:00+03:00"),
+        message("middle", "2026-08-04T09:00:00+03:00"),
+      ]],
+      { kind: "messages", value: 4 },
+      new Date("2026-08-04T12:00:00+03:00"),
+    );
+
+    expect(result.messages.map(({ id }) => id)).toEqual([
+      "invalid",
+      "old",
+      "middle",
+      "new",
+    ]);
+    expect(result.warnings).toEqual([
+      "Retained 1 message(s) with incomplete or invalid timestamps; chronological ordering is uncertain.",
+    ]);
+  });
+
   it("includes the day cutoff, excludes older and null timestamps, and reports the null count", () => {
     const now = new Date(2026, 7, 4, 12, 0, 0);
     const result = collectMessages(
@@ -184,8 +217,64 @@ describe("collectMessages", () => {
 
     expect(result.messages.map(({ id }) => id)).toEqual(["edge", "new"]);
     expect(result.warnings).toEqual([
-      "Excluded 2 message(s) with incomplete timestamps from the day boundary.",
+      "Excluded 2 message(s) with incomplete or invalid timestamps from the day boundary.",
     ]);
+  });
+
+  it("excludes malformed timestamps from day output and counts them with incomplete timestamps", () => {
+    const now = new Date(2026, 7, 4, 12, 0, 0);
+    const result = collectMessages(
+      [[
+        message("valid", new Date(2026, 7, 3, 9, 0, 0).toISOString()),
+        message("invalid", "not-a-timestamp"),
+        message("missing", null),
+      ]],
+      { kind: "days", value: 3 },
+      now,
+    );
+
+    expect(result.messages.map(({ id }) => id)).toEqual(["valid"]);
+    expect(result.warnings).toEqual([
+      "Excluded 2 message(s) with incomplete or invalid timestamps from the day boundary.",
+    ]);
+  });
+
+  it("warns once when indistinguishable fallback IDs collide within one window", () => {
+    const { id: _id, ...withoutId } = message(
+      "ignored",
+      "2026-08-04T09:00:00+03:00",
+    );
+    const fallbackId = fallbackMessageId("Family", withoutId);
+    const duplicate = { ...withoutId, id: fallbackId };
+
+    const result = collectMessages(
+      [[duplicate, { ...duplicate }]],
+      { kind: "messages", value: 10 },
+      new Date("2026-08-04T12:00:00+03:00"),
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.warnings).toEqual([
+      "Detected 1 ambiguous fallback message ID collision(s) within a single window.",
+    ]);
+  });
+
+  it("does not warn when a fallback record repeats only across overlapping windows", () => {
+    const { id: _id, ...withoutId } = message(
+      "ignored",
+      "2026-08-04T09:00:00+03:00",
+    );
+    const fallbackId = fallbackMessageId("Family", withoutId);
+    const duplicate = { ...withoutId, id: fallbackId };
+
+    const result = collectMessages(
+      [[duplicate], [{ ...duplicate }]],
+      { kind: "messages", value: 10 },
+      new Date("2026-08-04T12:00:00+03:00"),
+    );
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.warnings).toEqual([]);
   });
 
   it("does not mutate input windows or records", () => {
