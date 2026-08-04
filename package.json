@@ -1,0 +1,22 @@
+{
+  "name": "whatsapp-chat-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "whatsapp-scrape": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "tsx src/cli.ts"
+  },
+  "dependencies": { "playwright": "latest" },
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  },
+  "engines": { "node": ">=22" }
+}

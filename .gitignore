@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.whatsapp-profile/
+.runtime/
+exports/
+diagnostics/
+playwright-report/
+test-results/
+*.tmp
+.env
