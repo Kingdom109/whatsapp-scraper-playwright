@@ -57,9 +57,9 @@ function calendarIsReal(year: number, month: number, day: number, hour: number, 
     && candidate.getUTCMinutes() === minute;
 }
 
-export function parseDisplayedMetadata(metadata: string, timezoneOffsetMinutes: number): ParsedMetadata {
+export function parseDisplayedMetadata(metadata: string): ParsedMetadata {
   const match = /^\[\s*(\d{1,2}):(\d{2}),\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*\]\s*(.*?)(?::\s*)?$/.exec(metadata.trim());
-  if (match === null || !Number.isFinite(timezoneOffsetMinutes) || !Number.isInteger(timezoneOffsetMinutes)) {
+  if (match === null) {
     return { timestamp: null, sender: null, warning: unsupportedMetadataWarning };
   }
 
@@ -69,10 +69,17 @@ export function parseDisplayedMetadata(metadata: string, timezoneOffsetMinutes: 
   const day = Number(dayPart);
   const month = Number(monthPart);
   const year = Number(yearPart);
-  if (!calendarIsReal(year, month, day, hour, minute)) {
+  const localDate = new Date(year, month - 1, day, hour, minute);
+  if (!calendarIsReal(year, month, day, hour, minute)
+    || localDate.getFullYear() !== year
+    || localDate.getMonth() !== month - 1
+    || localDate.getDate() !== day
+    || localDate.getHours() !== hour
+    || localDate.getMinutes() !== minute) {
     return { timestamp: null, sender: senderPart?.trim() || null, warning: unsupportedMetadataWarning };
   }
 
+  const timezoneOffsetMinutes = localDate.getTimezoneOffset();
   const offsetSign = timezoneOffsetMinutes <= 0 ? "+" : "-";
   const absoluteOffset = Math.abs(timezoneOffsetMinutes);
   const offset = `${offsetSign}${twoDigits(Math.floor(absoluteOffset / 60))}:${twoDigits(absoluteOffset % 60)}`;
@@ -124,8 +131,8 @@ function reactionsFromRaw(raw: RawMessage["reactions"]): ReactionInfo[] | undefi
   return reactions.length > 0 ? reactions : undefined;
 }
 
-function mapRawMessage(raw: RawMessage, chat: string, timezoneOffsetMinutes: number): MessageRecord {
-  const metadata = parseDisplayedMetadata(raw.metadata ?? "", timezoneOffsetMinutes);
+function mapRawMessage(raw: RawMessage, chat: string): MessageRecord {
+  const metadata = parseDisplayedMetadata(raw.metadata ?? "");
   const rowClass = raw.rowClass.toLowerCase();
   const isSystem = raw.systemText !== null || rowClass.includes("system-message");
   const direction: Direction = isSystem
@@ -187,16 +194,24 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
   const rowSelector = await firstMatchingRowSelector(page);
   if (rowSelector === null) return [];
 
-  const [timezoneOffsetMinutes, rawMessages] = await Promise.all([
-    page.evaluate(() => new Date().getTimezoneOffset()),
-    page.locator(rowSelector).evaluateAll((rows, selectors): RawMessage[] => {
-      const firstMatch = (root: Element, candidates: readonly string[]): Element | null => {
-        for (const candidate of candidates) {
-          const found = root.querySelector(candidate);
-          if (found !== null) return found;
-        }
-        return null;
-      };
+  const rawMessages = await page.locator(rowSelector).evaluateAll((rows, selectors): RawMessage[] => {
+    const firstMatch = (root: Element, candidates: readonly string[]): Element | null => {
+      for (const candidate of candidates) {
+        const found = root.matches(candidate) ? root : root.querySelector(candidate);
+        if (found !== null) return found;
+      }
+      return null;
+    };
+    const firstMatchSet = (root: Element, candidates: readonly string[]): Element[] => {
+      for (const candidate of candidates) {
+        const found = [
+          ...(root.matches(candidate) ? [root] : []),
+          ...root.querySelectorAll(candidate),
+        ];
+        if (found.length > 0) return found;
+      }
+      return [];
+    };
       const text = (element: Element | null): string | null => {
         if (element === null) return null;
         return element instanceof HTMLElement ? element.innerText : element.textContent;
@@ -230,10 +245,10 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
         const type = mediaType(row);
         const media = type === null ? null : {
           type,
-          caption: text(row.querySelector('[data-testid="media-caption"]')),
-          filename: text(row.querySelector('[data-testid="document-filename"]')),
-          duration: text(row.querySelector('[data-testid="media-duration"]')),
-          size: text(row.querySelector('[data-testid="document-size"]')),
+          caption: text(firstMatch(row, selectors.mediaCaption)),
+          filename: text(firstMatch(row, selectors.mediaFilename)),
+          duration: text(firstMatch(row, selectors.mediaDuration)),
+          size: text(firstMatch(row, selectors.mediaSize)),
         };
         return {
           id: row.getAttribute("data-id"),
@@ -245,19 +260,22 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
           callText: text(firstMatch(row, selectors.call)),
           media,
           reply: replyElement === null ? null : {
-            sender: text(replyElement.querySelector('[data-testid="quoted-sender"]')),
-            text: text(firstMatch(replyElement, selectors.messageText)),
+            sender: text(firstMatch(replyElement, selectors.quotedSender)),
+            text: text(firstMatch(replyElement, selectors.quotedText)),
           },
           reactions: reactionsElement === null
             ? []
-            : [...reactionsElement.querySelectorAll('[data-testid="reaction"]')].map((reaction) => ({
-                emoji: text(reaction) ?? "",
-                count: reaction.getAttribute("data-count"),
-              })),
+            : firstMatchSet(reactionsElement, selectors.reactionItems).map((reaction) => {
+                const countElement = firstMatch(reaction, selectors.reactionCount);
+                const emojiElement = firstMatch(reaction, selectors.reactionEmoji);
+                return {
+                  emoji: text(emojiElement) ?? reaction.getAttribute("data-emoji") ?? "",
+                  count: countElement?.getAttribute("data-count") ?? text(countElement),
+                };
+              }),
         };
       });
-    }, whatsappSelectors),
-  ]);
+  }, whatsappSelectors);
 
-  return rawMessages.map((raw) => mapRawMessage(raw, chat, timezoneOffsetMinutes));
+  return rawMessages.map((raw) => mapRawMessage(raw, chat));
 }

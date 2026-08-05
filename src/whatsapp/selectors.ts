@@ -36,6 +36,27 @@ export const whatsappSelectors = {
   call: ['[data-testid="call-message"]', '[data-testid="call-log-message"]'],
   reply: ['[data-testid="quoted-message"]', '[data-testid="quoted-message-container"]'],
   reactions: ['[data-testid="reactions"]', '[data-testid="reaction-list"]'],
+  mediaCaption: ['[data-testid="media-caption"]', ".media-caption"],
+  mediaFilename: ['[data-testid="document-filename"]', '[data-testid="document-title"]'],
+  mediaDuration: ['[data-testid="media-duration"]', '[data-testid="media-playback-time"]'],
+  mediaSize: ['[data-testid="document-size"]', ".document-size"],
+  quotedSender: ['[data-testid="quoted-sender"]', '[data-testid="quoted-author"]'],
+  quotedText: [
+    '[data-testid="quoted-text"]',
+    '[data-testid="quoted-text-fallback"]',
+    '[data-testid="selectable-text"]',
+  ],
+  reactionItems: ['[data-testid="reaction"]', '[data-testid="reaction-chip"]'],
+  reactionCount: [
+    '[data-testid="reaction-count"]',
+    '[data-testid="reaction-count-fallback"]',
+    "[data-count]",
+  ],
+  reactionEmoji: [
+    '[data-testid="reaction-emoji"]',
+    '[data-testid="reaction-emoji-fallback"]',
+    "[data-emoji]",
+  ],
   media: {
     image: ['[data-testid="image-message"]', 'img[src^="blob:"]'],
     video: ['[data-testid="video-message"]', "video"],

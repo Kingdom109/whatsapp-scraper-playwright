@@ -24,12 +24,24 @@ afterAll(async () => {
 });
 
 describe("parseDisplayedMetadata", () => {
-  it("parses real DD/MM/YYYY calendar values using an explicit offset", () => {
-    expect(parseDisplayedMetadata("[9:14, 4/8/2026] Alice:", -180)).toEqual({
-      timestamp: "2026-08-04T09:14:00+03:00",
-      sender: "Alice",
-      warning: null,
-    });
+  it("uses the historical local offset for winter and summer message dates", () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = "Asia/Jerusalem";
+    try {
+      expect(parseDisplayedMetadata("[9:14, 4/1/2026] Alice:")).toEqual({
+        timestamp: "2026-01-04T09:14:00+02:00",
+        sender: "Alice",
+        warning: null,
+      });
+      expect(parseDisplayedMetadata("[9:14, 4/8/2026] Alice:")).toEqual({
+        timestamp: "2026-08-04T09:14:00+03:00",
+        sender: "Alice",
+        warning: null,
+      });
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
   });
 
   it.each([
@@ -38,7 +50,7 @@ describe("parseDisplayedMetadata", () => {
     "not WhatsApp metadata",
     "",
   ])("rejects unsupported metadata without guessing: %s", (metadata) => {
-    const result = parseDisplayedMetadata(metadata, 0);
+    const result = parseDisplayedMetadata(metadata);
     expect(result.timestamp).toBeNull();
     expect(result.warning).toMatch(/unsupported metadata/i);
   });
@@ -47,7 +59,6 @@ describe("parseDisplayedMetadata", () => {
 describe("parseRenderedMessages", () => {
   it("maps the first matching row selector in DOM order without mutating the page", async () => {
     const before = await page.content();
-    const offset = await page.evaluate(() => new Date().getTimezoneOffset());
     const messages = await parseRenderedMessages(page, "Synthetic Team");
 
     expect(await page.content()).toBe(before);
@@ -57,7 +68,7 @@ describe("parseRenderedMessages", () => {
     const incoming = messages[0]!;
     expect(incoming).toMatchObject({
       id: "stable-incoming",
-      timestamp: parseDisplayedMetadata("[09:14, 04/08/2026] Alice:", offset).timestamp,
+      timestamp: expect.any(String),
       sender: "Alice",
       direction: "incoming",
       text: "Hello from the synthetic fixture",

@@ -18,20 +18,20 @@
         <article class="message-in" data-testid="msg-container" data-id="stable-image">
           <span data-testid="msg-meta" data-pre-plain-text="[09:16, 04/08/2026] Alice:"></span>
           <figure data-testid="image-message"><img alt="synthetic gradient"></figure>
-          <span data-testid="media-caption">A generated gradient</span>
+          <span class="media-caption">A generated gradient</span>
         </article>
 
         <article class="message-in" data-testid="msg-container" data-id="stable-document">
           <span data-testid="msg-meta" data-pre-plain-text="[09:17, 04/08/2026] Bob:"></span>
           <div data-testid="document-message">
-            <span data-testid="document-filename">sample-notes.pdf</span>
-            <span data-testid="document-size">24 KB</span>
+            <span data-testid="document-title">sample-notes.pdf</span>
+            <span class="document-size">24 KB</span>
           </div>
         </article>
 
         <article class="message-in" data-testid="msg-container" data-id="stable-voice">
           <span data-testid="msg-meta" data-pre-plain-text="[09:18, 04/08/2026] Bob:"></span>
-          <div data-testid="voice-note"><span data-testid="media-duration">0:08</span></div>
+          <div data-testid="voice-note"><span data-testid="media-playback-time">0:08</span></div>
         </article>
 
         <article class="message-in" data-testid="msg-container" data-id="stable-video">
@@ -72,14 +72,14 @@
         <article class="message-in" data-testid="msg-container" data-id="stable-reply">
           <span data-testid="msg-meta" data-pre-plain-text="[09:26, 04/08/2026] Alice:"></span>
           <div data-testid="quoted-message">
-            <span data-testid="quoted-sender">Bob</span>
-            <span data-testid="selectable-text">Quoted words</span>
+            <span data-testid="quoted-author">Bob</span>
+            <span data-testid="quoted-text-fallback">Quoted words</span>
           </div>
           <span data-testid="selectable-text">Fresh response</span>
           <div data-testid="reactions">
-            <span data-testid="reaction" data-count="2"><span data-testid="selectable-text">👍</span></span>
-            <span data-testid="reaction" data-count="0">👎</span>
-            <span data-testid="reaction" data-count="NaN">🎉</span>
+            <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">👍</span><span data-testid="reaction-count-fallback">2</span></span>
+            <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">👎</span><span data-testid="reaction-count-fallback">0</span></span>
+            <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">🎉</span><span data-testid="reaction-count-fallback">NaN</span></span>
           </div>
         </article>
 
