@@ -1,4 +1,16 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  unlink as removeFile,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -50,6 +62,66 @@ afterEach(async () => {
 });
 
 describe("acquireProfileLock", () => {
+  it("reclaims an alive PID whose lease remains stale after the grace recheck", async () => {
+    const runtimeDir = await temporaryRoot();
+    const lockPath = join(runtimeDir, "profile.lock");
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, token: "reused-pid" }),
+      "utf8",
+    );
+    await utimes(lockPath, new Date(1_000), new Date(1_000));
+
+    const lock = await __acquireProfileLock(runtimeDir, {
+      now: () => 10_000,
+      leaseTimeoutMs: 1_000,
+      sleep: vi.fn().mockResolvedValue(undefined),
+      processIsAlive: () => true,
+    });
+
+    await lock.release();
+  });
+
+  it("keeps an EPERM owner with a fresh lease active", async () => {
+    const runtimeDir = await temporaryRoot();
+    const lockPath = join(runtimeDir, "profile.lock");
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: 987_654_321, token: "protected" }),
+      "utf8",
+    );
+    const modified = (await stat(lockPath)).mtimeMs;
+
+    await expect(
+      __acquireProfileLock(runtimeDir, {
+        now: () => modified,
+        leaseTimeoutMs: 1_000,
+        processIsAlive: () => true,
+      }),
+    ).rejects.toThrow("already running as process 987654321");
+  });
+
+  it("renews the lease through an inode-bound heartbeat", async () => {
+    const runtimeDir = await temporaryRoot();
+    let now = Date.now();
+    let heartbeat: (() => Promise<void>) | undefined;
+    const lock = await __acquireProfileLock(runtimeDir, {
+      now: () => now,
+      scheduleHeartbeat: (callback) => {
+        heartbeat = callback;
+        return () => undefined;
+      },
+    });
+    const before = (await stat(join(runtimeDir, "profile.lock"))).mtimeMs;
+
+    now += 5_000;
+    await heartbeat!();
+    const after = (await stat(join(runtimeDir, "profile.lock"))).mtimeMs;
+
+    expect(after).toBeGreaterThan(before);
+    await lock.release();
+  });
+
   it.each([1, 2, 3, 4])(
     "never exposes an incomplete profile lock during publication run %s",
     async () => {
@@ -149,6 +221,45 @@ describe("acquireProfileLock", () => {
     await expect(lock.release()).resolves.toBeUndefined();
   });
 
+  it("surfaces failure to unlink a dead recovery lock", async () => {
+    const runtimeDir = await temporaryRoot();
+    const recoveryPath = join(runtimeDir, "profile.lock.recovery");
+    await writeFile(recoveryPath, "malformed", "utf8");
+    const unlinkFailure = Object.assign(new Error("recovery unlink failed"), {
+      code: "EACCES",
+    });
+
+    await expect(
+      __acquireProfileLock(runtimeDir, {
+        unlink: async (path) => {
+          if (path === recoveryPath) throw unlinkFailure;
+          await removeFile(path);
+        },
+      }),
+    ).rejects.toThrow("recovery unlink failed");
+  });
+
+  it("retries cleanup of its exact publication temp path on release", async () => {
+    const runtimeDir = await temporaryRoot();
+    let failedTemporaryPath: string | undefined;
+    const lock = await __acquireProfileLock(runtimeDir, {
+      unlink: async (path) => {
+        if (path.endsWith(".tmp") && failedTemporaryPath === undefined) {
+          failedTemporaryPath = path;
+          throw Object.assign(new Error("temporary unlink failed"), { code: "EBUSY" });
+        }
+        await removeFile(path);
+      },
+    });
+
+    expect(failedTemporaryPath).toBeDefined();
+    expect(await readdir(runtimeDir)).toContain(
+      failedTemporaryPath!.slice(runtimeDir.length + 1),
+    );
+    await lock.release();
+    expect(await readdir(runtimeDir)).toEqual([]);
+  });
+
   it.each([
     ["stale", JSON.stringify({ pid: 2_147_483_647, token: "old" })],
     ["malformed", "not json"],
@@ -200,6 +311,60 @@ describe("acquireProfileLock", () => {
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     await owners[0]!.value.release();
   });
+
+  it("enforces ownership across spawned Windows processes", async () => {
+    const runtimeDir = await temporaryRoot();
+    const sessionUrl = new URL("../src/session.ts", import.meta.url).href;
+    const holderCode = `
+      import { acquireProfileLock } from ${JSON.stringify(sessionUrl)};
+      const lock = await acquireProfileLock(process.argv[1]);
+      process.stdout.write("acquired\\n");
+      process.stdin.once("data", async () => {
+        await lock.release();
+        process.exit(0);
+      });
+    `;
+    const holder = spawn(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", holderCode, runtimeDir],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    await new Promise<void>((resolveReady, rejectReady) => {
+      holder.stdout.once("data", (chunk) => {
+        if (String(chunk).includes("acquired")) resolveReady();
+        else rejectReady(new Error(`unexpected child output: ${String(chunk)}`));
+      });
+      holder.once("error", rejectReady);
+    });
+
+    const contenderCode = `
+      import { acquireProfileLock } from ${JSON.stringify(sessionUrl)};
+      try {
+        const lock = await acquireProfileLock(process.argv[1]);
+        await lock.release();
+        process.exit(0);
+      } catch (error) {
+        process.stderr.write(String(error.message));
+        process.exit(2);
+      }
+    `;
+    const contender = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", contenderCode, runtimeDir],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+
+    expect(contender.status).toBe(2);
+    expect(contender.stderr).toMatch(/already running as process/);
+    holder.stdin.write("release\n");
+    await new Promise<void>((resolveExit, rejectExit) => {
+      holder.once("exit", (code) => code === 0
+        ? resolveExit()
+        : rejectExit(new Error(`holder exited ${code}`)));
+    });
+    const lock = await acquireProfileLock(runtimeDir);
+    await lock.release();
+  }, 20_000);
 });
 
 type FakePage = {
@@ -212,13 +377,75 @@ function fakeBrowser(existingPages: FakePage[] = []) {
     pages: vi.fn(() => existingPages),
     newPage: vi.fn().mockResolvedValue(createdPage),
     close: vi.fn().mockResolvedValue(undefined),
+    browser: vi.fn(),
   };
+  let connected = true;
+  const browser = {
+    isConnected: vi.fn(() => connected),
+    close: vi.fn(async () => {
+      connected = false;
+    }),
+  };
+  context.browser.mockReturnValue(browser);
   const launchPersistentContext = vi.fn().mockResolvedValue(context);
 
-  return { context, createdPage, launchPersistentContext };
+  return { browser, context, createdPage, launchPersistentContext };
 }
 
 describe("openWhatsAppSession", () => {
+  it("uses one canonical lock for the same profile despite different runtime dirs", async () => {
+    const root = await temporaryRoot();
+    const profileDir = join(root, "profile", "..");
+    const firstFake = fakeBrowser();
+    const first = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-a") },
+      { launchPersistentContext: firstFake.launchPersistentContext },
+    );
+
+    await expect(
+      __openWhatsAppSession(
+        { profileDir: resolve(profileDir), runtimeDir: join(root, "runtime-b") },
+        { launchPersistentContext: fakeBrowser().launchPersistentContext },
+      ),
+    ).rejects.toThrow(/already running as process/);
+    await first.close();
+  });
+
+  it("allows different canonical profiles to run concurrently", async () => {
+    const root = await temporaryRoot();
+    const first = await __openWhatsAppSession(
+      { profileDir: join(root, "profile-a"), runtimeDir: join(root, "runtime") },
+      { launchPersistentContext: fakeBrowser().launchPersistentContext },
+    );
+    const second = await __openWhatsAppSession(
+      { profileDir: join(root, "profile-b"), runtimeDir: join(root, "runtime") },
+      { launchPersistentContext: fakeBrowser().launchPersistentContext },
+    );
+
+    await first.close();
+    await second.close();
+  });
+
+  it("treats a Windows junction alias as the same canonical profile", async () => {
+    const root = await temporaryRoot();
+    const profileDir = join(root, "profile");
+    const aliasDir = join(root, "profile-alias");
+    await mkdir(profileDir, { recursive: true });
+    await symlink(profileDir, aliasDir, "junction");
+    const first = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-a") },
+      { launchPersistentContext: fakeBrowser().launchPersistentContext },
+    );
+
+    await expect(
+      __openWhatsAppSession(
+        { profileDir: aliasDir, runtimeDir: join(root, "runtime-b") },
+        { launchPersistentContext: fakeBrowser().launchPersistentContext },
+      ),
+    ).rejects.toThrow(/already running as process/);
+    await first.close();
+  });
+
   it("launches the dedicated persistent profile visibly and reuses an existing page", async () => {
     const root = await temporaryRoot();
     const profileDir = join(root, "profile");
@@ -294,7 +521,9 @@ describe("openWhatsAppSession", () => {
       },
     );
 
-    expect(acquireLock).toHaveBeenCalledWith(resolve(".runtime"));
+    expect(acquireLock).toHaveBeenCalledWith(
+      join(resolve(".whatsapp-profile"), ".runtime"),
+    );
     expect(fake.launchPersistentContext.mock.calls[0]?.[0]).toBe(
       resolve(".whatsapp-profile"),
     );
@@ -372,6 +601,26 @@ describe("openWhatsAppSession", () => {
     expect(lock.release).toHaveBeenCalledOnce();
   });
 
+  it("retains the startup lock while a failed cleanup leaves the browser connected", async () => {
+    const lock = { release: vi.fn().mockResolvedValue(undefined) };
+    const page: FakePage = { goto: vi.fn().mockRejectedValue(new Error("goto failed")) };
+    const fake = fakeBrowser([page]);
+    fake.context.close.mockRejectedValue(new Error("context close failed"));
+    fake.browser.close.mockRejectedValue(new Error("browser close failed"));
+
+    await expect(
+      __openWhatsAppSession(
+        {},
+        {
+          acquireLock: vi.fn().mockResolvedValue(lock),
+          launchPersistentContext: fake.launchPersistentContext,
+        },
+      ),
+    ).rejects.toThrow("goto failed");
+    expect(fake.browser.isConnected()).toBe(true);
+    expect(lock.release).not.toHaveBeenCalled();
+  });
+
   it("closes once and releases the lock when session close is repeated", async () => {
     const lock = { release: vi.fn().mockResolvedValue(undefined) };
     const fake = fakeBrowser();
@@ -405,8 +654,56 @@ describe("openWhatsAppSession", () => {
     await expect(session.close()).rejects.toThrow("close failed");
     expect(lock.release).toHaveBeenCalledOnce();
     await expect(session.close()).rejects.toThrow("close failed");
-    expect(fake.context.close).toHaveBeenCalledOnce();
+    expect(fake.context.close).toHaveBeenCalledTimes(2);
     expect(lock.release).toHaveBeenCalledOnce();
+  });
+
+  it("retains the lock and permits close retry while the browser remains connected", async () => {
+    const root = await temporaryRoot();
+    const profileDir = join(root, "profile");
+    const fake = fakeBrowser();
+    fake.context.close
+      .mockRejectedValueOnce(new Error("close failed"))
+      .mockResolvedValueOnce(undefined);
+    fake.browser.close.mockRejectedValue(new Error("browser close failed"));
+    const session = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-a") },
+      { launchPersistentContext: fake.launchPersistentContext },
+    );
+
+    await expect(session.close()).rejects.toThrow("close failed");
+    await expect(
+      __openWhatsAppSession(
+        { profileDir, runtimeDir: join(root, "runtime-b") },
+        { launchPersistentContext: fakeBrowser().launchPersistentContext },
+      ),
+    ).rejects.toThrow(/already running as process/);
+
+    await expect(session.close()).resolves.toBeUndefined();
+    const replacement = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-c") },
+      { launchPersistentContext: fakeBrowser().launchPersistentContext },
+    );
+    await replacement.close();
+  });
+
+  it("releases the lock after close fails when the browser is disconnected", async () => {
+    const root = await temporaryRoot();
+    const profileDir = join(root, "profile");
+    const fake = fakeBrowser();
+    fake.context.close.mockRejectedValue(new Error("close failed"));
+    fake.browser.isConnected.mockReturnValue(false);
+    const session = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-a") },
+      { launchPersistentContext: fake.launchPersistentContext },
+    );
+
+    await expect(session.close()).rejects.toThrow("close failed");
+    const replacement = await __openWhatsAppSession(
+      { profileDir, runtimeDir: join(root, "runtime-b") },
+      { launchPersistentContext: fakeBrowser().launchPersistentContext },
+    );
+    await replacement.close();
   });
 
   it("retains the documented normal API", () => {
