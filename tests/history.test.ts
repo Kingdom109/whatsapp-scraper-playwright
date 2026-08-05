@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { spawnSync } from "node:child_process";
+import { inspect } from "node:util";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { MessageRecord, ScrapeLimit } from "../src/domain.js";
@@ -147,7 +148,7 @@ describe("loadHistory", () => {
   it.each([
     ["parse", "Failed to parse rendered WhatsApp history."],
     ["scroll", "Failed to scroll WhatsApp history."],
-  ] as const)("sanitizes a zero-record %s error and preserves the original only as cause", async (stage, publicMessage) => {
+  ] as const)("sanitizes every inspectable representation of a zero-record %s error", async (stage, publicMessage) => {
     const original = new Error("private message body must not leak");
     const failing = adapter([[]], [], { kind: "messages", value: 2 }, stage === "parse"
       ? { parseWindow: async () => { throw original; } }
@@ -156,8 +157,14 @@ describe("loadHistory", () => {
     const thrown = await loadHistory(failing).catch((error: unknown) => error);
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toBe(publicMessage);
-    expect((thrown as Error).message).not.toContain(original.message);
-    expect((thrown as Error & { cause?: unknown }).cause).toBe(original);
+    expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+    const rendered = [
+      String(thrown),
+      (thrown as Error).stack ?? "",
+      inspect(thrown, { depth: null, showHidden: true }),
+      JSON.stringify(thrown),
+    ].join("\n");
+    expect(rendered).not.toContain(original.message);
   });
 
   it.each(["parse", "scroll"] as const)("returns verified records with a non-sensitive warning after a %s error", async (stage) => {

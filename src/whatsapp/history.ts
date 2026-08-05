@@ -51,11 +51,11 @@ function finish(
 
 const stoppedWarning = "WhatsApp stopped loading older messages before the requested boundary.";
 
-function sanitizedStageError(stage: "parsing" | "scrolling", cause: unknown): Error {
+function sanitizedStageError(stage: "parsing" | "scrolling"): Error {
   const message = stage === "parsing"
     ? "Failed to parse rendered WhatsApp history."
     : "Failed to scroll WhatsApp history.";
-  return new Error(message, { cause });
+  return new Error(message);
 }
 
 export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResult> {
@@ -72,8 +72,8 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
     let window: MessageRecord[];
     try {
       window = await adapter.parseWindow();
-    } catch (error) {
-      if (latestById.size === 0) throw sanitizedStageError("parsing", error);
+    } catch {
+      if (latestById.size === 0) throw sanitizedStageError("parsing");
       return finish(
         latestById,
         fallbackCollisions,
@@ -122,8 +122,8 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
     let scrollResult: ScrollResult;
     try {
       scrollResult = await adapter.scrollOlder();
-    } catch (error) {
-      if (latestById.size === 0) throw sanitizedStageError("scrolling", error);
+    } catch {
+      if (latestById.size === 0) throw sanitizedStageError("scrolling");
       return finish(
         latestById,
         fallbackCollisions,
