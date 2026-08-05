@@ -18,14 +18,15 @@
         <article class="message-in" data-testid="msg-container" data-id="stable-image">
           <span data-testid="msg-meta" data-pre-plain-text="[09:16, 04/08/2026] Alice:"></span>
           <figure data-testid="image-message"><img alt="synthetic gradient"></figure>
-          <span class="media-caption">A generated gradient</span>
+          <span data-testid="selectable-text" class="media-caption">A generated gradient</span>
         </article>
 
         <article class="message-in" data-testid="msg-container" data-id="stable-document">
           <span data-testid="msg-meta" data-pre-plain-text="[09:17, 04/08/2026] Bob:"></span>
           <div data-testid="document-message">
-            <span data-testid="document-title">sample-notes.pdf</span>
-            <span class="document-size">24 KB</span>
+            <span data-testid="selectable-text" class="document-filename">sample-notes.pdf</span>
+            <span data-testid="selectable-text" class="media-duration">1 page</span>
+            <span data-testid="selectable-text" class="document-size">24 KB</span>
           </div>
         </article>
 
@@ -78,10 +79,39 @@
           <span data-testid="selectable-text">Fresh response</span>
           <div data-testid="reactions">
             <span data-testid="reaction" data-count="3"><span data-testid="selectable-text">❤️</span></span>
+            <span data-testid="reaction" data-count="5" data-emoji="🔥"></span>
+            <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">❤️</span><span data-testid="reaction-count-fallback">4</span></span>
             <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">👍</span><span data-testid="reaction-count-fallback">2</span></span>
             <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">👎</span><span data-testid="reaction-count-fallback">0</span></span>
             <span data-testid="reaction-chip"><span data-testid="reaction-emoji-fallback">🎉</span><span data-testid="reaction-count-fallback">NaN</span></span>
           </div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-quoted-image">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:26, 04/08/2026] Alice:"></span>
+          <div data-testid="quoted-message">
+            <span data-testid="quoted-author">Bob</span>
+            <figure data-testid="image-message"><img alt="synthetic quoted image"></figure>
+            <span data-testid="selectable-text" class="media-caption">Quoted image caption</span>
+          </div>
+          <span data-testid="selectable-text">Reply to an image</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-quoted-document">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:26, 04/08/2026] Alice:"></span>
+          <div data-testid="quoted-message">
+            <span data-testid="quoted-author">Bob</span>
+            <div data-testid="document-message">
+              <span data-testid="selectable-text" class="document-filename">quoted-sample.pdf</span>
+              <span data-testid="selectable-text" class="document-size">99 KB</span>
+            </div>
+          </div>
+          <span data-testid="selectable-text">Reply to a document</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-direct-no-sender">
+          <span data-testid="msg-meta" data-pre-plain-text="[10:00, 04/08/2026]"></span>
+          <span data-testid="selectable-text">Direct chat fallback</span>
         </article>
 
         <article class="message-in" data-testid="msg-container">
