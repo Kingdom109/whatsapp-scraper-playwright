@@ -21,11 +21,11 @@ function navigationHtml(
       ? '<div id="hidden-search" data-tab="3" contenteditable="true" style="display:none"></div>'
       : ""}<div id="search" role="textbox" contenteditable="true"></div>`;
   const rows = chats.map(({ title, header = title, titleAttribute = title }, index) =>
-    `<button data-row="${index}" data-clicked="0" onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');if(h)h.setAttribute('title',this.dataset.header)" data-header="${header}"><span data-testid="cell-frame-title" title="${titleAttribute}">${title}</span></button>`,
+    `<button data-row="${index}" data-clicked="0" onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');if(h){h.setAttribute('title',this.dataset.header);h.textContent=this.dataset.header}" data-header="${header}"><span data-testid="cell-frame-title" title="${titleAttribute}">${title}</span></button>`,
   ).join("");
   const header = options.header === false
     ? ""
-    : '<header><span data-testid="conversation-info-header-chat-title" title=""></span></header>';
+    : '<header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header>';
   return `<div id="side">${search}${rows}</div><div id="main">${header}</div>`;
 }
 
@@ -132,11 +132,11 @@ describe("openExactChat", () => {
         <div id="search" role="textbox" contenteditable="true"
           oninput="setTimeout(() => document.querySelector('[data-row]').style.display='block', 35)"></div>
         <button style="display:none" data-row="0" data-clicked="0"
-          onclick="this.dataset.clicked='1';document.querySelector('[data-testid=conversation-info-header-chat-title]').setAttribute('title','Team')">
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
           <span data-testid="cell-frame-title" title="Team">Team</span>
         </button>
       </div>
-      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title=""></span></header></div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
     `);
 
     await openExactChat(page, "Team");
@@ -174,6 +174,41 @@ describe("openExactChat", () => {
     expect(await clickCounts()).toEqual(["0"]);
   });
 
+  it("ignores hidden duplicate and partial chat titles", async () => {
+    await page.setContent(navigationHtml([
+      { title: "Team" },
+      { title: "Team" },
+      { title: "Team Archive" },
+    ]));
+    await page.locator('[data-row="1"], [data-row="2"]').evaluateAll((rows) => {
+      for (const row of rows) (row as HTMLElement).style.display = "none";
+    });
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1", "0", "0"]);
+  });
+
+  it("verifies the first visible header instead of a hidden attached match", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"></div>
+        <button data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';document.querySelectorAll('[data-testid=conversation-info-header-chat-title]')[1].setAttribute('title','Other')">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header>
+        <span style="display:none" data-testid="conversation-info-header-chat-title" title="Team"></span>
+        <span data-testid="conversation-info-header-chat-title" title="Other">visible header</span>
+      </header></div>
+    `);
+
+    await expect(openExactChat(page, "Team")).rejects.toThrow("did not exactly match");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
   it.each(["", " \t\u00a0 "])("rejects a blank requested name %j before interacting", async (name) => {
     await page.setContent(navigationHtml([{ title: "Team" }]));
 
@@ -186,7 +221,7 @@ describe("openExactChat", () => {
 
 describe("waitForWhatsAppReady", () => {
   it("returns ready when an app-ready candidate is visible", async () => {
-    await page.setContent('<div id="main"></div>');
+    await page.setContent('<div id="main">ready</div>');
 
     await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("ready");
   });
@@ -198,9 +233,27 @@ describe("waitForWhatsAppReady", () => {
   });
 
   it("prefers ready when ready and QR candidates are both visible", async () => {
-    await page.setContent('<div id="main"></div><div id="app"><canvas aria-label="QR code"></canvas></div>');
+    await page.setContent('<div id="main">ready</div><div id="app"><canvas aria-label="QR code"></canvas></div>');
 
     await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("ready");
+  });
+
+  it("returns login-required when app-ready markup is hidden and QR is visible", async () => {
+    await page.setContent('<div id="main" style="display:none">ready</div><div id="app"><canvas aria-label="QR code"></canvas></div>');
+
+    await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("login-required");
+  });
+
+  it("returns ready when app-ready markup is visible and QR is hidden", async () => {
+    await page.setContent('<div id="main">ready</div><div id="app"><canvas style="display:none" aria-label="QR code"></canvas></div>');
+
+    await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("ready");
+  });
+
+  it("times out when all readiness candidates are hidden", async () => {
+    await page.setContent('<div id="main" style="display:none">ready</div><div id="app"><canvas style="display:none" aria-label="QR code"></canvas></div>');
+
+    await expect(waitForWhatsAppReady(page, 40)).rejects.toThrow("WhatsApp readiness");
   });
 
   it("times out with a targeted readiness error that does not expose page content", async () => {
@@ -219,7 +272,7 @@ describe("ensureLoggedIn", () => {
     await page.setContent('<div id="app"><canvas aria-label="QR code"></canvas></div>');
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await page.evaluate(() => {
-      setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="main"></div>'), 35);
+      setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="main">ready</div>'), 35);
     });
 
     await ensureLoggedIn(page, 150);
@@ -241,10 +294,19 @@ describe("ensureLoggedIn", () => {
   });
 
   it("returns immediately when ready without writing a QR instruction", async () => {
-    await page.setContent('<div id="main"></div>');
+    await page.setContent('<div id="main">ready</div>');
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
     await ensureLoggedIn(page, 100);
+
+    expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it("does not print a login instruction for a hidden QR candidate", async () => {
+    await page.setContent('<div id="app"><canvas style="display:none" aria-label="QR code"></canvas></div>');
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    await expect(ensureLoggedIn(page, 40)).rejects.toThrow("WhatsApp readiness");
 
     expect(stderr).not.toHaveBeenCalled();
   });

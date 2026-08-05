@@ -37,29 +37,12 @@ async function firstVisibleLocator(
     const count = await matches.count();
     for (let index = 0; index < count; index += 1) {
       const match = matches.nth(index);
-      if (await match.isVisible()) return match;
+      try {
+        if (await match.isVisible()) return match;
+      } catch {
+        // A re-render can detach a candidate between count() and isVisible().
+      }
     }
-  }
-  return null;
-}
-
-async function hasVisibleCandidate(
-  page: Page,
-  candidates: readonly string[],
-): Promise<boolean> {
-  for (const selector of candidates) {
-    if (await page.locator(selector).count() > 0) return true;
-  }
-  return false;
-}
-
-async function firstAttachedLocator(
-  page: Page,
-  candidates: readonly string[],
-): Promise<Locator | null> {
-  for (const selector of candidates) {
-    const matches = page.locator(selector);
-    if (await matches.count() > 0) return matches.first();
   }
   return null;
 }
@@ -71,7 +54,11 @@ async function visibleTitlesForFirstWorkingCandidate(page: Page): Promise<Locato
     const count = await matches.count();
     for (let index = 0; index < count; index += 1) {
       const match = matches.nth(index);
-      if (await match.isVisible()) visible.push(match);
+      try {
+        if (await match.isVisible()) visible.push(match);
+      } catch {
+        // Ignore title nodes replaced while search results are rendering.
+      }
     }
     if (visible.length > 0) return visible;
   }
@@ -112,8 +99,8 @@ export async function waitForWhatsAppReady(
   const deadline = Date.now() + Math.max(0, timeoutMs);
 
   do {
-    if (await hasVisibleCandidate(page, whatsappSelectors.appReady)) return "ready";
-    if (await hasVisibleCandidate(page, whatsappSelectors.qrCode)) return "login-required";
+    if (await firstVisibleLocator(page, whatsappSelectors.appReady) !== null) return "ready";
+    if (await firstVisibleLocator(page, whatsappSelectors.qrCode) !== null) return "login-required";
     if (Date.now() >= deadline) break;
     await page.waitForTimeout(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
   } while (Date.now() <= deadline);
@@ -131,7 +118,7 @@ export async function ensureLoggedIn(
 
   process.stderr.write("Scan the visible WhatsApp QR code with your phone to continue.\n");
   do {
-    if (await hasVisibleCandidate(page, whatsappSelectors.appReady)) return;
+    if (await firstVisibleLocator(page, whatsappSelectors.appReady) !== null) return;
     if (Date.now() >= deadline) break;
     await page.waitForTimeout(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())));
   } while (Date.now() <= deadline);
@@ -162,7 +149,7 @@ export async function openExactChat(page: Page, requestedName: string): Promise<
   const headerDeadline = Date.now() + HEADER_TIMEOUT_MS;
   let actual = "";
   do {
-    const header = await firstAttachedLocator(page, whatsappSelectors.chatHeaderTitle);
+    const header = await firstVisibleLocator(page, whatsappSelectors.chatHeaderTitle);
     if (header !== null) {
       actual = await visibleTitle(header);
       if (actual === expected) return;
@@ -171,7 +158,7 @@ export async function openExactChat(page: Page, requestedName: string): Promise<
     await page.waitForTimeout(POLL_INTERVAL_MS);
   } while (Date.now() <= headerDeadline);
 
-  if (await firstAttachedLocator(page, whatsappSelectors.chatHeaderTitle) === null) {
+  if (await firstVisibleLocator(page, whatsappSelectors.chatHeaderTitle) === null) {
     throw new Error("Opened WhatsApp chat header could not be verified");
   }
   throw new Error("Opened WhatsApp chat header did not exactly match the requested chat");
