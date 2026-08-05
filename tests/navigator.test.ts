@@ -7,6 +7,7 @@ import {
   openExactChat,
   waitForWhatsAppReady,
 } from "../src/whatsapp/navigator.js";
+import { whatsappSelectors } from "../src/whatsapp/selectors.js";
 
 let browser: Browser;
 let page: Page;
@@ -19,7 +20,7 @@ function navigationHtml(
     ? ""
     : `${options.hiddenPreferredSearch
       ? '<div id="hidden-search" data-tab="3" contenteditable="true" style="display:none"></div>'
-      : ""}<div id="search" role="textbox" contenteditable="true"></div>`;
+      : ""}<div id="search" role="textbox" contenteditable="true" oninput="document.querySelector('[data-pre-search]')?.remove()"></div><span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>`;
   const rows = chats.map(({ title, header = title, titleAttribute = title }, index) =>
     `<button data-row="${index}" data-clicked="0" onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');if(h){h.setAttribute('title',this.dataset.header);h.textContent=this.dataset.header}" data-header="${header}"><span data-testid="cell-frame-title" title="${titleAttribute}">${title}</span></button>`,
   ).join("");
@@ -35,6 +36,42 @@ async function clickCounts(): Promise<string[]> {
   );
 }
 
+function withAdversarialTitleReorder(realPage: Page): Page {
+  const wrapTitleLocator = (locator: ReturnType<Page["locator"]>, clickable: boolean): ReturnType<Page["locator"]> =>
+    new Proxy(locator, {
+      get(target, property) {
+        if (property === "nth") {
+          return (index: number) => wrapTitleLocator(target.nth(index), true);
+        }
+        if (property === "click" && clickable) {
+          return async (options?: Parameters<typeof target.click>[0]) => {
+            await realPage.locator("#results").evaluate((results) => {
+              results.prepend(results.lastElementChild!);
+            });
+            return target.click(options);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+  return new Proxy(realPage, {
+    get(target, property) {
+      if (property === "locator") {
+        return (selector: string, options?: Parameters<Page["locator"]>[1]) => {
+          const locator = target.locator(selector, options);
+          return whatsappSelectors.chatTitles.some((candidate) => candidate === selector)
+            ? wrapTitleLocator(locator, false)
+            : locator;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
 });
@@ -45,7 +82,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   page = await browser.newPage();
-  page.setDefaultTimeout(250);
 });
 
 afterEach(async () => {
@@ -130,7 +166,8 @@ describe("openExactChat", () => {
     await page.setContent(`
       <div id="side">
         <div id="search" role="textbox" contenteditable="true"
-          oninput="setTimeout(() => document.querySelector('[data-row]').style.display='block', 35)"></div>
+          oninput="document.querySelector('[data-pre-search]').remove();setTimeout(() => document.querySelector('[data-row]').style.display='block', 35)"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
         <button style="display:none" data-row="0" data-clicked="0"
           onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
           <span data-testid="cell-frame-title" title="Team">Team</span>
@@ -141,6 +178,131 @@ describe("openExactChat", () => {
 
     await openExactChat(page, "Team");
 
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("waits beyond the settle window for a result rendered 350ms after fill", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="setTimeout(() => document.querySelector('[data-row]').style.display='block', 350)"></div>
+        <button style="display:none" data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("does not settle on stale pre-fill partial results", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="setTimeout(() => {document.querySelector('[data-row=partial]').style.display='none';document.querySelector('[data-row=exact]').style.display='block'}, 350)"></div>
+        <button data-row="partial" data-clicked="0" onclick="this.dataset.clicked='1'">
+          <span data-testid="cell-frame-title" title="Team Archive">Team Archive</span>
+        </button>
+        <button style="display:none" data-row="exact" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await page.locator('[data-row="partial"]').getAttribute("data-clicked")).toBe("0");
+    expect(await page.locator('[data-row="exact"]').getAttribute("data-clicked")).toBe("1");
+  });
+
+  it("does not treat a stable interim lifecycle result as final zero-exact", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="document.querySelector('[data-pre-search]').remove();document.querySelector('[data-row=interim]').style.display='block';setTimeout(() => {document.querySelector('[data-row=interim]').style.display='none';document.querySelector('[data-row=exact]').style.display='block'}, 350)"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button style="display:none" data-row="interim" data-clicked="0" onclick="this.dataset.clicked='1'">
+          <span data-testid="cell-frame-title" title="Loading Team Archive">Loading Team Archive</span>
+        </button>
+        <button style="display:none" data-row="exact" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await page.locator('[data-row="interim"]').getAttribute("data-clicked")).toBe("0");
+    expect(await page.locator('[data-row="exact"]').getAttribute("data-clicked")).toBe("1");
+  });
+
+  it("never clicks an unrelated row while results repeatedly reorder", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="document.querySelector('[data-pre-search]').remove()"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <div id="results">
+          <button data-row="exact" data-clicked="0"
+            onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
+            <span data-testid="cell-frame-title" title="Team">Team</span>
+          </button>
+          <button data-row="unrelated" data-clicked="0" onclick="this.dataset.clicked='1'">
+            <span data-testid="cell-frame-title" title="Other">Other</span>
+          </button>
+        </div>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+
+    await openExactChat(withAdversarialTitleReorder(page), "Team");
+
+    expect(await page.locator('[data-row="exact"]').getAttribute("data-clicked")).toBe("1");
+    expect(await page.locator('[data-row="unrelated"]').getAttribute("data-clicked")).toBe("0");
+  });
+
+  it("fails within the search budget when a title disappears", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="setTimeout(() => document.querySelector('[data-row]').remove(), 50)"></div>
+        <button data-row="0" data-clicked="0"><span data-testid="cell-frame-title" title="Team">Team</span></button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+    const started = Date.now();
+
+    await expect(openExactChat(page, "Team")).rejects.toBeInstanceOf(ChatNotFoundError);
+
+    expect(Date.now() - started).toBeLessThan(2_800);
+    expect(await page.locator('[data-row][data-clicked="1"]').count()).toBe(0);
+  });
+
+  it("fails within the header budget when the header disappears after click", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true" oninput="document.querySelector('[data-pre-search]').remove()"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';document.querySelector('#main header').remove()">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+    const started = Date.now();
+
+    await expect(openExactChat(page, "Team")).rejects.toThrow("header could not be verified");
+
+    expect(Date.now() - started).toBeLessThan(1_800);
     expect(await clickCounts()).toEqual(["1"]);
   });
 
@@ -192,7 +354,8 @@ describe("openExactChat", () => {
   it("verifies the first visible header instead of a hidden attached match", async () => {
     await page.setContent(`
       <div id="side">
-        <div id="search" role="textbox" contenteditable="true"></div>
+        <div id="search" role="textbox" contenteditable="true" oninput="document.querySelector('[data-pre-search]').remove()"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
         <button data-row="0" data-clicked="0"
           onclick="this.dataset.clicked='1';document.querySelectorAll('[data-testid=conversation-info-header-chat-title]')[1].setAttribute('title','Other')">
           <span data-testid="cell-frame-title" title="Team">Team</span>
