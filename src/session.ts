@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  link,
   mkdir,
   open,
   readFile,
@@ -37,6 +38,10 @@ export interface WhatsAppSession {
 interface SessionDependencies {
   acquireLock?: typeof acquireProfileLock;
   launchPersistentContext?: BrowserType<ChromiumBrowser>["launchPersistentContext"];
+}
+
+interface LockDependencies {
+  beforePublish?: (path: string) => Promise<void>;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -103,20 +108,27 @@ function throwWithSecondary(primary: unknown, secondary: unknown[]): never {
   throw new AggregateError(failures, message);
 }
 
-async function createOwnedFile(path: string, owner: LockOwner): Promise<void> {
+async function createOwnedFile(
+  path: string,
+  owner: LockOwner,
+  dependencies: LockDependencies = {},
+): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let handle: FileHandle | undefined;
   try {
-    handle = await open(path, "wx");
+    handle = await open(temporaryPath, "wx");
     await handle.writeFile(JSON.stringify(owner), "utf8");
+    await handle.sync();
     await handle.close();
     handle = undefined;
+    await dependencies.beforePublish?.(path);
+    await link(temporaryPath, path);
   } catch (error) {
     const closeError = await closeHandle(handle);
-    const cleanupError = handle === undefined
-      ? undefined
-      : await bestEffortUnlink(path);
+    const cleanupError = await bestEffortUnlink(temporaryPath);
     throwWithSecondary(error, [closeError, cleanupError]);
   }
+  await bestEffortUnlink(temporaryPath);
 }
 
 async function readOwner(path: string): Promise<LockOwner | undefined> {
@@ -152,10 +164,14 @@ async function waitForRecovery(recoveryPath: string): Promise<void> {
   throw new Error("profile lock recovery is already in progress");
 }
 
-async function reclaimStaleLock(lockPath: string, recoveryPath: string): Promise<void> {
+async function reclaimStaleLock(
+  lockPath: string,
+  recoveryPath: string,
+  dependencies: LockDependencies,
+): Promise<void> {
   const recoveryOwner = { pid: process.pid, token: randomUUID() };
   try {
-    await createOwnedFile(recoveryPath, recoveryOwner);
+    await createOwnedFile(recoveryPath, recoveryOwner, dependencies);
   } catch (error) {
     if (errorCode(error) === "EEXIST") {
       await waitForRecovery(recoveryPath);
@@ -193,6 +209,13 @@ async function reclaimStaleLock(lockPath: string, recoveryPath: string): Promise
 }
 
 export async function acquireProfileLock(runtimeDir: string): Promise<ProfileLock> {
+  return __acquireProfileLock(runtimeDir);
+}
+
+export async function __acquireProfileLock(
+  runtimeDir: string,
+  dependencies: LockDependencies = {},
+): Promise<ProfileLock> {
   const resolvedRuntimeDir = resolve(runtimeDir);
   const lockPath = join(resolvedRuntimeDir, LOCK_FILENAME);
   const recoveryPath = join(resolvedRuntimeDir, RECOVERY_FILENAME);
@@ -203,7 +226,7 @@ export async function acquireProfileLock(runtimeDir: string): Promise<ProfileLoc
   for (;;) {
     await waitForRecovery(recoveryPath);
     try {
-      await createOwnedFile(lockPath, owner);
+      await createOwnedFile(lockPath, owner, dependencies);
       break;
     } catch (error) {
       if (errorCode(error) !== "EEXIST") throw error;
@@ -213,7 +236,7 @@ export async function acquireProfileLock(runtimeDir: string): Promise<ProfileLoc
     if (currentOwner !== undefined && processIsAlive(currentOwner.pid)) {
       throw new Error(`already running as process ${currentOwner.pid}`);
     }
-    await reclaimStaleLock(lockPath, recoveryPath);
+    await reclaimStaleLock(lockPath, recoveryPath, dependencies);
   }
 
   let releasePromise: Promise<void> | undefined;

@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  __acquireProfileLock,
   __openWhatsAppSession,
   acquireProfileLock,
   openWhatsAppSession,
@@ -16,6 +17,30 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolvePromise!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+async function visibleContents(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) =>
@@ -25,6 +50,83 @@ afterEach(async () => {
 });
 
 describe("acquireProfileLock", () => {
+  it.each([1, 2, 3, 4])(
+    "never exposes an incomplete profile lock during publication run %s",
+    async () => {
+      const runtimeDir = await temporaryRoot();
+      const entered = deferred();
+      const release = deferred();
+      let paused = false;
+      const first = __acquireProfileLock(runtimeDir, {
+        beforePublish: async (path) => {
+          if (!paused && path.endsWith("profile.lock")) {
+            paused = true;
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      });
+
+      await entered.promise;
+      const observed = await visibleContents(join(runtimeDir, "profile.lock"));
+      const second = acquireProfileLock(runtimeDir);
+      release.resolve();
+      const results = await Promise.allSettled([first, second]);
+      const owners = results.filter(
+        (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof acquireProfileLock>>> =>
+          result.status === "fulfilled",
+      );
+      const finalContents = await readFile(join(runtimeDir, "profile.lock"), "utf8");
+
+      expect(observed).toBeUndefined();
+      expect(owners).toHaveLength(1);
+      expect(() => JSON.parse(finalContents)).not.toThrow();
+      await owners[0]!.value.release();
+    },
+  );
+
+  it.each([1, 2, 3, 4])(
+    "never exposes an incomplete recovery lock during publication run %s",
+    async () => {
+      const runtimeDir = await temporaryRoot();
+      await writeFile(
+        join(runtimeDir, "profile.lock"),
+        JSON.stringify({ pid: 2_147_483_647, token: "stale" }),
+        "utf8",
+      );
+      const entered = deferred();
+      const release = deferred();
+      let paused = false;
+      const first = __acquireProfileLock(runtimeDir, {
+        beforePublish: async (path) => {
+          if (!paused && path.endsWith("profile.lock.recovery")) {
+            paused = true;
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      });
+
+      await entered.promise;
+      const observed = await visibleContents(
+        join(runtimeDir, "profile.lock.recovery"),
+      );
+      const second = acquireProfileLock(runtimeDir);
+      release.resolve();
+      const results = await Promise.allSettled([first, second]);
+      const owners = results.filter(
+        (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof acquireProfileLock>>> =>
+          result.status === "fulfilled",
+      );
+      const finalContents = await readFile(join(runtimeDir, "profile.lock"), "utf8");
+
+      expect(observed).toBeUndefined();
+      expect(owners.length).toBeLessThanOrEqual(1);
+      expect(() => JSON.parse(finalContents)).not.toThrow();
+      await Promise.all(owners.map(({ value }) => value.release()));
+    },
+  );
+
   it("rejects a second active owner and permits reacquisition after release", async () => {
     const runtimeDir = await temporaryRoot();
     const first = await acquireProfileLock(runtimeDir);
@@ -32,6 +134,7 @@ describe("acquireProfileLock", () => {
     await expect(acquireProfileLock(runtimeDir)).rejects.toThrow(
       `already running as process ${process.pid}`,
     );
+    expect(await readdir(runtimeDir)).toEqual(["profile.lock"]);
 
     await first.release();
     const second = await acquireProfileLock(runtimeDir);
