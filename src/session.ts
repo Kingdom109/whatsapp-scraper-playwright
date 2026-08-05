@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import {
   link,
   mkdir,
@@ -9,6 +10,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   chromium,
   type BrowserContext,
@@ -20,14 +22,19 @@ import {
 const LOCK_FILENAME = "profile.lock";
 const RECOVERY_FILENAME = "profile.lock.recovery";
 const WHATSAPP_URL = "https://web.whatsapp.com/";
-const DEFAULT_LEASE_TIMEOUT_MS = 2_000;
-const DEFAULT_LEASE_GRACE_MS = 50;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 500;
+const execFileAsync = promisify(execFile);
 
 interface LockOwner {
   pid: number;
   token: string;
+  incarnation?: string;
 }
+
+type ProcessIdentity =
+  | { status: "found"; identity: string }
+  | { status: "missing" }
+  | { status: "unavailable" };
 
 export interface ProfileLock {
   release(): Promise<void>;
@@ -47,10 +54,9 @@ interface SessionDependencies {
 interface LockDependencies {
   beforePublish?: (path: string) => Promise<void>;
   now?: () => number;
-  leaseTimeoutMs?: number;
-  leaseGraceMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   processIsAlive?: (pid: number) => boolean;
+  processIdentity?: (pid: number) => Promise<ProcessIdentity>;
   scheduleHeartbeat?: (
     callback: () => Promise<void>,
     intervalMs: number,
@@ -82,7 +88,9 @@ function parseOwner(contents: string): LockOwner | undefined {
       typeof value.token === "string" &&
       value.token.length > 0
     ) {
-      return { pid: value.pid!, token: value.token };
+      return typeof value.incarnation === "string" && value.incarnation.length > 0
+        ? { pid: value.pid!, token: value.token, incarnation: value.incarnation }
+        : { pid: value.pid!, token: value.token };
     }
   } catch {
     // Malformed lock files are stale.
@@ -102,6 +110,55 @@ function processIsAlive(pid: number): boolean {
     // also treated conservatively so a possibly active profile is not stolen.
     return true;
   }
+}
+
+let currentProcessIdentity: Promise<ProcessIdentity> | undefined;
+
+async function lookupProcessIdentity(pid: number): Promise<ProcessIdentity> {
+  if (process.platform === "win32") {
+    try {
+      const command = `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
+        "[Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)";
+      const { stdout } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", command],
+        { encoding: "utf8", windowsHide: true },
+      );
+      const identity = stdout.trim();
+      return identity === ""
+        ? { status: "unavailable" }
+        : { status: "found", identity: `windows:${identity}` };
+    } catch {
+      return processIsAlive(pid)
+        ? { status: "unavailable" }
+        : { status: "missing" };
+    }
+  }
+
+  if (process.platform === "linux") {
+    try {
+      const contents = await readFile(`/proc/${pid}/stat`, "utf8");
+      const fields = contents.slice(contents.lastIndexOf(")") + 2).split(" ");
+      const startTime = fields[19];
+      return startTime === undefined
+        ? { status: "unavailable" }
+        : { status: "found", identity: `linux:${startTime}` };
+    } catch (error) {
+      return errorCode(error) === "ENOENT"
+        ? { status: "missing" }
+        : { status: "unavailable" };
+    }
+  }
+
+  return processIsAlive(pid)
+    ? { status: "unavailable" }
+    : { status: "missing" };
+}
+
+function processIdentity(pid: number): Promise<ProcessIdentity> {
+  if (pid !== process.pid) return lookupProcessIdentity(pid);
+  currentProcessIdentity ??= lookupProcessIdentity(pid);
+  return currentProcessIdentity;
 }
 
 async function closeHandle(handle: FileHandle | undefined): Promise<unknown> {
@@ -196,24 +253,21 @@ function scheduleHeartbeat(
 }
 
 async function ownerIsActive(
-  path: string,
   snapshot: LockSnapshot,
   dependencies: LockDependencies,
 ): Promise<boolean> {
   const owner = snapshot.owner;
   if (owner === undefined) return false;
-  const now = dependencies.now ?? Date.now;
-  const leaseTimeoutMs = dependencies.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS;
-  const isAlive = dependencies.processIsAlive ?? processIsAlive;
-  if (!isAlive(owner.pid)) return false;
-  if (now() - snapshot.modifiedAt <= leaseTimeoutMs) return true;
+  const identity = await (dependencies.processIdentity ?? processIdentity)(owner.pid);
+  if (identity.status === "missing") return false;
+  if (identity.status === "found" && owner.incarnation !== undefined) {
+    return identity.identity === owner.incarnation;
+  }
 
-  await (dependencies.sleep ?? sleep)(
-    dependencies.leaseGraceMs ?? DEFAULT_LEASE_GRACE_MS,
-  );
-  const refreshed = await readLockSnapshot(path);
-  return refreshed?.owner?.token === owner.token &&
-    now() - refreshed.modifiedAt <= leaseTimeoutMs;
+  // Legacy locks lack an incarnation. If their PID is still present, or an
+  // identity lookup is denied, retain ownership conservatively.
+  const isAlive = dependencies.processIsAlive ?? processIsAlive;
+  return isAlive(owner.pid);
 }
 
 async function waitForRecovery(
@@ -228,7 +282,7 @@ async function waitForRecovery(
       if (cleanupError !== undefined) throw cleanupError;
       continue;
     }
-    if (!(await ownerIsActive(recoveryPath, snapshot, dependencies))) {
+    if (!(await ownerIsActive(snapshot, dependencies))) {
       const cleanupError = await bestEffortUnlink(recoveryPath, dependencies);
       if (cleanupError !== undefined) throw cleanupError;
       continue;
@@ -242,8 +296,9 @@ async function reclaimStaleLock(
   lockPath: string,
   recoveryPath: string,
   dependencies: LockDependencies,
+  incarnation: string,
 ): Promise<void> {
-  const recoveryOwner = { pid: process.pid, token: randomUUID() };
+  const recoveryOwner = { pid: process.pid, token: randomUUID(), incarnation };
   let publication: Publication;
   try {
     publication = await createOwnedFile(recoveryPath, recoveryOwner, dependencies);
@@ -258,7 +313,7 @@ async function reclaimStaleLock(
   let primaryError: unknown;
   try {
     const current = await readLockSnapshot(lockPath);
-    if (current !== undefined && await ownerIsActive(lockPath, current, dependencies)) {
+    if (current !== undefined && await ownerIsActive(current, dependencies)) {
       throw new Error(`already running as process ${current.owner!.pid}`);
     }
     const cleanupError = await bestEffortUnlink(lockPath, dependencies);
@@ -301,7 +356,15 @@ export async function __acquireProfileLock(
   const resolvedRuntimeDir = resolve(runtimeDir);
   const lockPath = join(resolvedRuntimeDir, LOCK_FILENAME);
   const recoveryPath = join(resolvedRuntimeDir, RECOVERY_FILENAME);
-  const owner = { pid: process.pid, token: randomUUID() };
+  const ownIdentity = await (dependencies.processIdentity ?? processIdentity)(process.pid);
+  if (ownIdentity.status !== "found") {
+    throw new Error("cannot establish the current process incarnation");
+  }
+  const owner = {
+    pid: process.pid,
+    token: randomUUID(),
+    incarnation: ownIdentity.identity,
+  };
 
   await mkdir(resolvedRuntimeDir, { recursive: true });
 
@@ -316,10 +379,15 @@ export async function __acquireProfileLock(
     }
 
     const current = await readLockSnapshot(lockPath);
-    if (current !== undefined && await ownerIsActive(lockPath, current, dependencies)) {
+    if (current !== undefined && await ownerIsActive(current, dependencies)) {
       throw new Error(`already running as process ${current.owner!.pid}`);
     }
-    await reclaimStaleLock(lockPath, recoveryPath, dependencies);
+    await reclaimStaleLock(
+      lockPath,
+      recoveryPath,
+      dependencies,
+      ownIdentity.identity,
+    );
   }
 
   let leaseHandle: FileHandle;

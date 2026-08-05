@@ -62,40 +62,71 @@ afterEach(async () => {
 });
 
 describe("acquireProfileLock", () => {
-  it("reclaims an alive PID whose lease remains stale after the grace recheck", async () => {
+  it("rejects a matching process incarnation despite an arbitrarily stale heartbeat", async () => {
     const runtimeDir = await temporaryRoot();
     const lockPath = join(runtimeDir, "profile.lock");
     await writeFile(
       lockPath,
-      JSON.stringify({ pid: process.pid, token: "reused-pid" }),
+      JSON.stringify({ pid: process.pid, token: "same-process", incarnation: "same" }),
       "utf8",
     );
     await utimes(lockPath, new Date(1_000), new Date(1_000));
 
+    await expect(
+      __acquireProfileLock(runtimeDir, {
+        now: () => 1_000_000,
+        processIdentity: async () => ({ status: "found", identity: "same" }),
+      }),
+    ).rejects.toThrow(`already running as process ${process.pid}`);
+  });
+
+  it("reclaims a reused PID with a different process incarnation", async () => {
+    const runtimeDir = await temporaryRoot();
+    const lockPath = join(runtimeDir, "profile.lock");
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, token: "reused-pid", incarnation: "old" }),
+      "utf8",
+    );
+
     const lock = await __acquireProfileLock(runtimeDir, {
-      now: () => 10_000,
-      leaseTimeoutMs: 1_000,
-      sleep: vi.fn().mockResolvedValue(undefined),
-      processIsAlive: () => true,
+      processIdentity: async () => ({ status: "found", identity: "new" }),
     });
 
     await lock.release();
   });
 
-  it("keeps an EPERM owner with a fresh lease active", async () => {
+  it("reclaims a lock when its PID is absent", async () => {
     const runtimeDir = await temporaryRoot();
     const lockPath = join(runtimeDir, "profile.lock");
     await writeFile(
       lockPath,
-      JSON.stringify({ pid: 987_654_321, token: "protected" }),
+      JSON.stringify({ pid: 987_654_321, token: "gone", incarnation: "old" }),
       "utf8",
     );
-    const modified = (await stat(lockPath)).mtimeMs;
+
+    const lock = await __acquireProfileLock(runtimeDir, {
+      processIdentity: async (pid) => pid === process.pid
+        ? { status: "found", identity: "current" }
+        : { status: "missing" },
+    });
+    await lock.release();
+  });
+
+  it("keeps an owner active when identity lookup is unavailable but PID is alive", async () => {
+    const runtimeDir = await temporaryRoot();
+    const lockPath = join(runtimeDir, "profile.lock");
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: 987_654_321, token: "protected", incarnation: "unknown" }),
+      "utf8",
+    );
 
     await expect(
       __acquireProfileLock(runtimeDir, {
-        now: () => modified,
-        leaseTimeoutMs: 1_000,
+        processIdentity: async (pid) => pid === process.pid
+          ? { status: "found", identity: "current" }
+          : { status: "unavailable" },
         processIsAlive: () => true,
       }),
     ).rejects.toThrow("already running as process 987654321");
@@ -270,10 +301,11 @@ describe("acquireProfileLock", () => {
     const lock = await acquireProfileLock(runtimeDir);
     const owner = JSON.parse(
       await readFile(join(runtimeDir, "profile.lock"), "utf8"),
-    ) as { pid: number; token: string };
+    ) as { pid: number; token: string; incarnation: string };
 
     expect(owner.pid).toBe(process.pid);
     expect(owner.token).not.toBe("old");
+    expect(owner.incarnation).toMatch(/^windows:|^linux:/);
     await lock.release();
   });
 
@@ -365,6 +397,69 @@ describe("acquireProfileLock", () => {
     const lock = await acquireProfileLock(runtimeDir);
     await lock.release();
   }, 20_000);
+
+  it("does not steal from a live child whose event loop blocks beyond the lease", async () => {
+    const runtimeDir = await temporaryRoot();
+    const sessionUrl = new URL("../src/session.ts", import.meta.url).href;
+    const holderCode = `
+      import { acquireProfileLock } from ${JSON.stringify(sessionUrl)};
+      const lock = await acquireProfileLock(process.argv[1]);
+      process.stdout.write("acquired\\n");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
+      await lock.release();
+    `;
+    const holder = spawn(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", holderCode, runtimeDir],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stderr = "";
+    holder.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exitPromise = new Promise<number | null>((resolveExit) => {
+      holder.once("exit", resolveExit);
+    });
+
+    try {
+      await new Promise<void>((resolveReady, rejectReady) => {
+        holder.stdout.once("data", (chunk) => {
+          if (String(chunk).includes("acquired")) resolveReady();
+          else rejectReady(new Error(`unexpected child output: ${String(chunk)}`));
+        });
+        holder.once("error", rejectReady);
+      });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_300));
+
+      const [contender] = await Promise.allSettled([
+        acquireProfileLock(runtimeDir),
+      ]);
+      if (contender.status === "fulfilled") {
+        await contender.value.release();
+      }
+      expect(contender.status).toBe("rejected");
+      if (contender.status === "rejected") {
+        expect(String(contender.reason)).toMatch(/already running as process/);
+      }
+    } finally {
+      const exited = await Promise.race([
+        exitPromise.then(() => true),
+        new Promise<false>((resolveTimeout) =>
+          setTimeout(() => resolveTimeout(false), 7_000),
+        ),
+      ]);
+      if (!exited) {
+        holder.kill();
+        await Promise.race([
+          exitPromise,
+          new Promise((resolveTimeout) => setTimeout(resolveTimeout, 2_000)),
+        ]);
+      }
+    }
+
+    expect(holder.exitCode).toBe(0);
+    expect(stderr).toBe("");
+  }, 15_000);
 });
 
 type FakePage = {
