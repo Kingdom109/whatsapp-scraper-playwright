@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <aside id="side"><div contenteditable="true" data-tab="3"></div></aside>
+    <main id="main">
+      <header><span data-testid="conversation-info-header-chat-title">Synthetic Team</span></header>
+      <section data-testid="conversation-panel-messages">
+        <article class="message-in" data-testid="msg-container" data-id="stable-incoming">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:14, 04/08/2026] Alice:"></span>
+          <span data-testid="selectable-text">Hello from the synthetic fixture</span>
+        </article>
+
+        <article class="message-out" data-testid="msg-container" data-id="stable-outgoing">
+          <span data-testid="msg-meta" data-pre-plain-text="[9:15, 4/8/2026] Me:"></span>
+          <div data-testid="selectable-text">שלום לכולם 👋<br>שורה שנייה</div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-image">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:16, 04/08/2026] Alice:"></span>
+          <figure data-testid="image-message"><img alt="synthetic gradient"></figure>
+          <span data-testid="media-caption">A generated gradient</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-document">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:17, 04/08/2026] Bob:"></span>
+          <div data-testid="document-message">
+            <span data-testid="document-filename">sample-notes.pdf</span>
+            <span data-testid="document-size">24 KB</span>
+          </div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-voice">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:18, 04/08/2026] Bob:"></span>
+          <div data-testid="voice-note"><span data-testid="media-duration">0:08</span></div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-video">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:19, 04/08/2026] Alice:"></span>
+          <div data-testid="video-message"><span data-testid="media-duration">0:12</span></div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-gif">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:20, 04/08/2026] Alice:"></span>
+          <div data-testid="gif-message"></div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-sticker">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:21, 04/08/2026] Bob:"></span>
+          <div data-testid="sticker-message"></div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-deleted">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:22, 04/08/2026] Alice:"></span>
+          <span data-testid="deleted-message">This message was deleted</span>
+        </article>
+
+        <article class="system-message" data-testid="msg-container" data-id="stable-system">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:23, 04/08/2026]"></span>
+          <span data-testid="system-message">Messages are end-to-end encrypted. Carol joined using an invite link.</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-call">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:24, 04/08/2026] Bob:"></span>
+          <span data-testid="call-message">Missed voice call</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-unsupported">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:25, 04/08/2026] Alice:"></span>
+          <div data-testid="unsupported-card" aria-label="Poll"></div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-reply">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:26, 04/08/2026] Alice:"></span>
+          <div data-testid="quoted-message">
+            <span data-testid="quoted-sender">Bob</span>
+            <span data-testid="selectable-text">Quoted words</span>
+          </div>
+          <span data-testid="selectable-text">Fresh response</span>
+          <div data-testid="reactions">
+            <span data-testid="reaction" data-count="2"><span data-testid="selectable-text">👍</span></span>
+            <span data-testid="reaction" data-count="0">👎</span>
+            <span data-testid="reaction" data-count="NaN">🎉</span>
+          </div>
+        </article>
+
+        <article class="message-in" data-testid="msg-container">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:27, 04/08/2026] Dana:"></span>
+          <span data-testid="selectable-text">No stable identifier</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-bad-date">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:28, 31/02/2026] Alice:"></span>
+          <span data-testid="selectable-text">Impossible date</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-us-date">
+          <span data-testid="msg-meta" data-pre-plain-text="[09:29, 08/31/2026] Alice:"></span>
+          <span data-testid="selectable-text">Unsupported date format</span>
+        </article>
+
+        <article class="message-in" data-testid="msg-container" data-id="stable-no-meta">
+          <span data-testid="selectable-text">No timestamp metadata</span>
+        </article>
+      </section>
+      <article class="legacy-message" data-id="must-not-be-selected">
+        <span data-pre-plain-text="[09:30, 04/08/2026] Trap:"></span>
+        <span data-testid="selectable-text">Lower-priority selector trap</span>
+      </article>
+    </main>
+  </body>
+</html>
