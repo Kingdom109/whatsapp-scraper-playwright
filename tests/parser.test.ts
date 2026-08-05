@@ -97,9 +97,12 @@ describe("parseRenderedMessages", () => {
     expect(messages[12]).toMatchObject({
       text: "Fresh response",
       reply: { sender: "Bob", text: "Quoted words" },
-      reactions: [{ emoji: "👍", count: 2 }],
+      reactions: [
+        { emoji: "❤️", count: 3 },
+        { emoji: "👍", count: 2 },
+      ],
     });
-    expect(messages[12]!.text).not.toMatch(/Quoted words|👍/);
+    expect(messages[12]!.text).not.toMatch(/Quoted words|❤️|👍|3|2/);
 
     const withoutId = messages[13]!;
     expect(withoutId.id).toBe(fallbackMessageId("Synthetic Team", {

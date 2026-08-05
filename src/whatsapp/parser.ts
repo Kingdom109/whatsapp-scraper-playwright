@@ -124,7 +124,7 @@ function reactionsFromRaw(raw: RawMessage["reactions"]): ReactionInfo[] | undefi
   const reactions = raw.flatMap(({ emoji: rawEmoji, count: rawCount }) => {
     const emoji = rawEmoji.trim();
     const count = Number(rawCount);
-    return emoji !== "" && Number.isFinite(count) && Number.isInteger(count) && count > 0
+    return emoji !== "" && Number.isSafeInteger(count) && count > 0
       ? [{ emoji, count }]
       : [];
   });
@@ -202,15 +202,11 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
       }
       return null;
     };
-    const firstMatchSet = (root: Element, candidates: readonly string[]): Element[] => {
-      for (const candidate of candidates) {
-        const found = [
-          ...(root.matches(candidate) ? [root] : []),
-          ...root.querySelectorAll(candidate),
-        ];
-        if (found.length > 0) return found;
-      }
-      return [];
+    const allMatches = (root: Element, candidates: readonly string[]): Element[] => {
+      const descendants = [...root.querySelectorAll(candidates.join(","))];
+      return candidates.some((candidate) => root.matches(candidate))
+        ? [root, ...descendants]
+        : descendants;
     };
       const text = (element: Element | null): string | null => {
         if (element === null) return null;
@@ -265,11 +261,15 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
           },
           reactions: reactionsElement === null
             ? []
-            : firstMatchSet(reactionsElement, selectors.reactionItems).map((reaction) => {
+            : allMatches(reactionsElement, selectors.reactionItems).map((reaction) => {
                 const countElement = firstMatch(reaction, selectors.reactionCount);
                 const emojiElement = firstMatch(reaction, selectors.reactionEmoji);
                 return {
-                  emoji: text(emojiElement) ?? reaction.getAttribute("data-emoji") ?? "",
+                  emoji: text(emojiElement)
+                    ?? reaction.getAttribute("data-emoji")
+                    ?? reaction.getAttribute("aria-label")
+                    ?? text(reaction)
+                    ?? "",
                   count: countElement?.getAttribute("data-count") ?? text(countElement),
                 };
               }),

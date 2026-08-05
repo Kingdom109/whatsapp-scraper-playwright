@@ -55,6 +55,7 @@ export const whatsappSelectors = {
   reactionEmoji: [
     '[data-testid="reaction-emoji"]',
     '[data-testid="reaction-emoji-fallback"]',
+    '[data-testid="selectable-text"]',
     "[data-emoji]",
   ],
   media: {
