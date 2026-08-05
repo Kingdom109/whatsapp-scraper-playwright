@@ -28,53 +28,91 @@ function requirePositiveInteger(value: number, label: "maxCycles" | "stallCycles
 }
 
 function finish(
-  windows: MessageRecord[][],
+  latestById: ReadonlyMap<string, MessageRecord>,
+  fallbackCollisions: number,
   adapter: HistoryAdapter,
   complete: boolean,
   warning?: string,
 ): HistoryResult {
-  const collected = collectMessages(windows, adapter.limit, adapter.now);
+  const collected = collectMessages([[...latestById.values()]], adapter.limit, adapter.now);
+  const fallbackWarning = fallbackCollisions === 0
+    ? []
+    : [`Detected ${fallbackCollisions} ambiguous fallback message ID collision(s) within a single window.`];
   return {
     messages: collected.messages,
     complete,
-    warnings: warning === undefined
-      ? collected.warnings
-      : [...collected.warnings, warning],
+    warnings: [
+      ...collected.warnings,
+      ...fallbackWarning,
+      ...(warning === undefined ? [] : [warning]),
+    ],
   };
+}
+
+const stoppedWarning = "WhatsApp stopped loading older messages before the requested boundary.";
+
+function sanitizedStageError(stage: "parsing" | "scrolling", cause: unknown): Error {
+  const message = stage === "parsing"
+    ? "Failed to parse rendered WhatsApp history."
+    : "Failed to scroll WhatsApp history.";
+  return new Error(message, { cause });
 }
 
 export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResult> {
   requirePositiveInteger(adapter.maxCycles, "maxCycles");
   requirePositiveInteger(adapter.stallCycles, "stallCycles");
 
-  const windows: MessageRecord[][] = [];
-  const seen = new Map<string, MessageRecord>();
-  let stalls = 0;
+  const latestById = new Map<string, MessageRecord>();
+  let fallbackCollisions = 0;
+  let noProgressCycles = 0;
+  let stalledScrolls = 0;
+  let hasScrolled = false;
 
   for (let cycle = 0; cycle < adapter.maxCycles; cycle += 1) {
     let window: MessageRecord[];
     try {
       window = await adapter.parseWindow();
     } catch (error) {
-      if (seen.size === 0) throw error;
+      if (latestById.size === 0) throw sanitizedStageError("parsing", error);
       return finish(
-        windows,
+        latestById,
+        fallbackCollisions,
         adapter,
         false,
         "History loading stopped during message parsing; returning verified records collected so far.",
       );
     }
 
-    windows.push(window);
-    for (const record of window) seen.set(record.id, record);
+    const fallbackIdsInWindow = new Set<string>();
+    let newIds = 0;
+    for (const record of window) {
+      const id = record.id;
+      if (/^[0-9a-f]{24}$/.test(id)) {
+        if (fallbackIdsInWindow.has(id)) fallbackCollisions += 1;
+        fallbackIdsInWindow.add(id);
+      }
+      if (!latestById.has(id)) newIds += 1;
+      latestById.set(id, record);
+    }
 
-    if (boundaryReached(seen.values(), adapter.limit, adapter.now)) {
-      return finish(windows, adapter, true);
+    if (boundaryReached(latestById.values(), adapter.limit, adapter.now)) {
+      return finish(latestById, fallbackCollisions, adapter, true);
+    }
+
+    if (newIds > 0) {
+      noProgressCycles = 0;
+      stalledScrolls = 0;
+    } else if (hasScrolled) {
+      noProgressCycles += 1;
+      if (noProgressCycles >= adapter.stallCycles) {
+        return finish(latestById, fallbackCollisions, adapter, false, stoppedWarning);
+      }
     }
 
     if (cycle + 1 >= adapter.maxCycles) {
       return finish(
-        windows,
+        latestById,
+        fallbackCollisions,
         adapter,
         false,
         "Maximum history-loading cycles reached before the requested boundary.",
@@ -85,9 +123,10 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
     try {
       scrollResult = await adapter.scrollOlder();
     } catch (error) {
-      if (seen.size === 0) throw error;
+      if (latestById.size === 0) throw sanitizedStageError("scrolling", error);
       return finish(
-        windows,
+        latestById,
+        fallbackCollisions,
         adapter,
         false,
         "History loading stopped during scrolling; returning verified records collected so far.",
@@ -95,28 +134,25 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
     }
 
     if (scrollResult === "start") {
-      if (adapter.limit.kind === "days") return finish(windows, adapter, true);
+      if (adapter.limit.kind === "days") {
+        return finish(latestById, fallbackCollisions, adapter, true);
+      }
       return finish(
-        windows,
+        latestById,
+        fallbackCollisions,
         adapter,
         false,
-        `Requested ${adapter.limit.value} messages, but only ${seen.size} available in this chat.`,
+        `Requested ${adapter.limit.value} messages, but only ${latestById.size} available in this chat.`,
       );
     }
 
     if (scrollResult === "stalled") {
-      stalls += 1;
-      if (stalls >= adapter.stallCycles) {
-        return finish(
-          windows,
-          adapter,
-          false,
-          "WhatsApp stopped loading older messages before the requested boundary.",
-        );
+      stalledScrolls += 1;
+      if (stalledScrolls >= adapter.stallCycles) {
+        return finish(latestById, fallbackCollisions, adapter, false, stoppedWarning);
       }
-    } else {
-      stalls = 0;
     }
+    hasScrolled = true;
   }
 
   throw new Error("unreachable history-loading state");
@@ -176,6 +212,17 @@ async function currentSnapshot(page: Page): Promise<ScrollSnapshot | null> {
     .catch(() => null);
 }
 
+async function hasVisibleHistoryStart(page: Page): Promise<boolean> {
+  for (const selector of whatsappSelectors.historyStart) {
+    const candidates = page.locator(selector);
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      if (await candidates.nth(index).isVisible().catch(() => false)) return true;
+    }
+  }
+  return false;
+}
+
 function changed(before: ScrollSnapshot, after: ScrollSnapshot): boolean {
   return before.top !== after.top
     || before.height !== after.height
@@ -201,21 +248,22 @@ export function createPlaywrightHistoryAdapter(
         throw new Error("WhatsApp message scroll container was not found");
       }
 
+      if (await hasVisibleHistoryStart(page)) return "start";
+
       const before = await container.evaluate(snapshotBrowser, whatsappSelectors.messageRows, { timeout: 300 });
       await container.evaluate(scrollBrowser, undefined, { timeout: 300 });
 
       const deadline = Date.now() + 2_000;
-      let stableTopObservations = before.top <= 0 ? 1 : 0;
       while (Date.now() < deadline) {
         const after = await currentSnapshot(page);
         if (after !== null) {
           if (changed(before, after)) return "moved";
-          stableTopObservations = after.top <= 0 ? stableTopObservations + 1 : 0;
         }
+        if (await hasVisibleHistoryStart(page)) return "start";
         await page.waitForTimeout(100);
       }
 
-      return stableTopObservations >= 3 ? "start" : "stalled";
+      return await hasVisibleHistoryStart(page) ? "start" : "stalled";
     },
   };
 }

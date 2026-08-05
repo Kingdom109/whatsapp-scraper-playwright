@@ -110,6 +110,25 @@ describe("loadHistory", () => {
     expect(result.warnings.join(" ")).toMatch(/stopped loading older messages/i);
   });
 
+  it("treats repeated viewport movement without new IDs as stalled progress", async () => {
+    let parseCalls = 0;
+    const result = await loadHistory(adapter([
+      [message("same", "2026-08-04T10:00:00+03:00")],
+    ], [], { kind: "messages", value: 5 }, {
+      maxCycles: 10,
+      stallCycles: 2,
+      parseWindow: async () => {
+        parseCalls += 1;
+        return [message("same", "2026-08-04T10:00:00+03:00")];
+      },
+      scrollOlder: async () => "moved",
+    }));
+
+    expect(result.complete).toBe(false);
+    expect(result.warnings.join(" ")).toMatch(/stopped loading older messages/i);
+    expect(parseCalls).toBe(3);
+  });
+
   it("returns partial at max cycles without an extra scroll", async () => {
     let scrollCalls = 0;
     const result = await loadHistory(adapter([
@@ -125,13 +144,20 @@ describe("loadHistory", () => {
     expect(scrollCalls).toBe(1);
   });
 
-  it.each(["parse", "scroll"] as const)("rethrows the original %s error when no records were verified", async (stage) => {
+  it.each([
+    ["parse", "Failed to parse rendered WhatsApp history."],
+    ["scroll", "Failed to scroll WhatsApp history."],
+  ] as const)("sanitizes a zero-record %s error and preserves the original only as cause", async (stage, publicMessage) => {
     const original = new Error("private message body must not leak");
     const failing = adapter([[]], [], { kind: "messages", value: 2 }, stage === "parse"
       ? { parseWindow: async () => { throw original; } }
       : { scrollOlder: async () => { throw original; } });
 
-    await expect(loadHistory(failing)).rejects.toBe(original);
+    const thrown = await loadHistory(failing).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(publicMessage);
+    expect((thrown as Error).message).not.toContain(original.message);
+    expect((thrown as Error & { cause?: unknown }).cause).toBe(original);
   });
 
   it.each(["parse", "scroll"] as const)("returns verified records with a non-sensitive warning after a %s error", async (stage) => {
@@ -156,6 +182,53 @@ describe("loadHistory", () => {
 
     expect(result.complete).toBe(true);
     expect(result.warnings.join(" ")).toMatch(/invalid timestamps/i);
+  });
+
+  it("consolidates same-window fallback-ID ambiguity without retaining duplicate windows", async () => {
+    const fallbackId = "0123456789abcdef01234567";
+    let parseCalls = 0;
+    const result = await loadHistory(adapter([], [], { kind: "messages", value: 3 }, {
+      maxCycles: 3,
+      stallCycles: 4,
+      parseWindow: async () => {
+        parseCalls += 1;
+        return [
+          message(fallbackId, "2026-08-04T10:00:00+03:00", `first-${parseCalls}`),
+          message(fallbackId, "2026-08-04T10:00:00+03:00", `second-${parseCalls}`),
+        ];
+      },
+      scrollOlder: async () => "moved",
+    }));
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.text).toBe("second-3");
+    expect(result.warnings.filter((warning) => warning.includes("ambiguous fallback"))).toEqual([
+      "Detected 3 ambiguous fallback message ID collision(s) within a single window.",
+    ]);
+  });
+
+  it("finalizes high-overlap history with work proportional to unique IDs", async () => {
+    let idReads = 0;
+    const unique = Array.from({ length: 100 }, (_, index) => {
+      const record = message(`id-${index}`, "2026-08-04T10:00:00+03:00");
+      Object.defineProperty(record, "id", {
+        configurable: true,
+        enumerable: true,
+        get: () => { idReads += 1; return `id-${index}`; },
+      });
+      return record;
+    });
+
+    const result = await loadHistory(adapter([], [], { kind: "messages", value: 101 }, {
+      maxCycles: 500,
+      stallCycles: 501,
+      parseWindow: async () => unique,
+      scrollOlder: async () => "moved",
+    }));
+
+    expect(result.messages).toHaveLength(100);
+    expect(result.warnings.join(" ")).toMatch(/maximum history-loading cycles/i);
+    expect(idReads).toBeLessThan(110_000);
   });
 
   it.each([
@@ -213,8 +286,38 @@ describe("createPlaywrightHistoryAdapter", () => {
     await page.close();
   });
 
-  it("reports true start only after a stable observation at the top", async () => {
+  it("does not infer start from a quiet top without an affirmative marker", async () => {
     await content('<div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"><div style="height:800px"><div data-id="oldest"></div></div></div>');
+
+    const result = await createPlaywrightHistoryAdapter(page, "Chat", { kind: "days", value: 1 }, NOW).scrollOlder();
+
+    expect(result).toBe("stalled");
+    await page.close();
+  });
+
+  it("does not infer start from an initially empty top while loading continues after the poll", async () => {
+    await content('<div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"></div>');
+    await page.evaluate(() => {
+      setTimeout(() => {
+        const late = document.createElement("div");
+        late.setAttribute("data-id", "late");
+        document.querySelector('[data-testid="conversation-panel-messages"]')?.append(late);
+      }, 2_500);
+    });
+
+    const result = await createPlaywrightHistoryAdapter(page, "Chat", { kind: "days", value: 1 }, NOW).scrollOlder();
+
+    expect(result).toBe("stalled");
+    await page.waitForTimeout(600);
+    expect(await page.locator("[data-id=late]").count()).toBe(1);
+    await page.close();
+  });
+
+  it("returns start only for a visible affirmative centralized marker", async () => {
+    await content(`
+      <div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"></div>
+      <div data-testid="history-start">Beginning of chat history</div>
+    `);
 
     const result = await createPlaywrightHistoryAdapter(page, "Chat", { kind: "days", value: 1 }, NOW).scrollOlder();
 
@@ -226,7 +329,7 @@ describe("createPlaywrightHistoryAdapter", () => {
     await content('<div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"><div style="height:2000px"><div data-id="oldest"></div></div></div>');
     await page.locator('[data-testid="conversation-panel-messages"]').evaluate((element) => {
       element.scrollTop = 1000;
-      element.addEventListener("scroll", () => { element.scrollTop = 1000; });
+      Object.defineProperty(element, "scrollBy", { value: () => undefined });
     });
     page.setDefaultTimeout(30_000);
     const started = performance.now();

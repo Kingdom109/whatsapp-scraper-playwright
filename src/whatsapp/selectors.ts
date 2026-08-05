@@ -31,6 +31,10 @@ export const whatsappSelectors = {
     '#main [data-testid="conversation-panel-messages"]',
     '#main .copyable-area [tabindex="-1"]',
   ],
+  historyStart: [
+    '#main [data-testid="conversation-history-start"]',
+    '#main [data-testid="history-start"]',
+  ],
   deleted: ['[data-testid="deleted-message"]', '[aria-label="This message was deleted"]'],
   system: ['[data-testid="system-message"]', ".system-message"],
   call: ['[data-testid="call-message"]', '[data-testid="call-log-message"]'],
