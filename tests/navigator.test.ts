@@ -7,7 +7,6 @@ import {
   openExactChat,
   waitForWhatsAppReady,
 } from "../src/whatsapp/navigator.js";
-import { whatsappSelectors } from "../src/whatsapp/selectors.js";
 
 let browser: Browser;
 let page: Page;
@@ -34,42 +33,6 @@ async function clickCounts(): Promise<string[]> {
   return page.locator("[data-row]").evaluateAll((rows) =>
     rows.map((row) => row.getAttribute("data-clicked") ?? ""),
   );
-}
-
-function withAdversarialTitleReorder(realPage: Page): Page {
-  const wrapTitleLocator = (locator: ReturnType<Page["locator"]>, clickable: boolean): ReturnType<Page["locator"]> =>
-    new Proxy(locator, {
-      get(target, property) {
-        if (property === "nth") {
-          return (index: number) => wrapTitleLocator(target.nth(index), true);
-        }
-        if (property === "click" && clickable) {
-          return async (options?: Parameters<typeof target.click>[0]) => {
-            await realPage.locator("#results").evaluate((results) => {
-              results.prepend(results.lastElementChild!);
-            });
-            return target.click(options);
-          };
-        }
-        const value = Reflect.get(target, property, target) as unknown;
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-
-  return new Proxy(realPage, {
-    get(target, property) {
-      if (property === "locator") {
-        return (selector: string, options?: Parameters<Page["locator"]>[1]) => {
-          const locator = target.locator(selector, options);
-          return whatsappSelectors.chatTitles.some((candidate) => candidate === selector)
-            ? wrapTitleLocator(locator, false)
-            : locator;
-        };
-      }
-      const value = Reflect.get(target, property, target) as unknown;
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 }
 
 beforeAll(async () => {
@@ -244,29 +207,58 @@ describe("openExactChat", () => {
     expect(await page.locator('[data-row="exact"]').getAttribute("data-clicked")).toBe("1");
   });
 
-  it("never clicks an unrelated row while results repeatedly reorder", async () => {
+  it("does not activate a pinned node recycled from exact to unrelated under an overlay", async () => {
     await page.setContent(`
       <div id="side">
         <div id="search" role="textbox" contenteditable="true"
-          oninput="document.querySelector('[data-pre-search]').remove()"></div>
+          oninput="document.querySelector('[data-pre-search]').remove();setTimeout(() => {const t=document.querySelector('[data-target]');t.title='Other';t.textContent='Other'}, 250);setTimeout(() => document.querySelector('[data-overlay]').remove(), 400)"></div>
         <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
-        <div id="results">
-          <button data-row="exact" data-clicked="0"
-            onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
-            <span data-testid="cell-frame-title" title="Team">Team</span>
-          </button>
-          <button data-row="unrelated" data-clicked="0" onclick="this.dataset.clicked='1'">
-            <span data-testid="cell-frame-title" title="Other">Other</span>
-          </button>
-        </div>
+        <button data-row="recycled" data-unrelated-clicks="0"
+          onclick="this.dataset.unrelatedClicks=String(Number(this.dataset.unrelatedClicks)+1)">
+          <span data-target data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
       </div>
+      <div data-overlay style="position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.01)"></div>
       <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
     `);
 
-    await openExactChat(withAdversarialTitleReorder(page), "Team");
+    await expect(openExactChat(page, "Team")).rejects.toBeInstanceOf(ChatNotFoundError);
 
-    expect(await page.locator('[data-row="exact"]').getAttribute("data-clicked")).toBe("1");
-    expect(await page.locator('[data-row="unrelated"]').getAttribute("data-clicked")).toBe("0");
+    expect(await page.locator('[data-row="recycled"]').getAttribute("data-unrelated-clicks")).toBe("0");
+  });
+
+  it("activates the exact pinned node after its overlay clears", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true"
+          oninput="document.querySelector('[data-pre-search]').remove();setTimeout(() => document.querySelector('[data-overlay]').remove(), 350)"></div>
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button data-row="exact" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.title='Team';h.textContent='Team'">
+          <span data-target data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div data-overlay style="position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.01)"></div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("bounds a delayed search fill under the normal Playwright timeout", async () => {
+    await page.setContent(`
+      <div id="side">
+        <div id="search" role="textbox" contenteditable="true" aria-disabled="true"></div>
+      </div>
+      <div id="main"></div>
+    `);
+    const started = Date.now();
+
+    await expect(openExactChat(page, "Team")).rejects.toThrow("search could not be filled");
+
+    expect(Date.now() - started).toBeLessThan(2_800);
   });
 
   it("fails within the search budget when a title disappears", async () => {
