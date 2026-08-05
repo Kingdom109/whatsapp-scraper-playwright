@@ -76,7 +76,7 @@ describe("parseRenderedMessages", () => {
     const messages = await parseRenderedMessages(page, "Synthetic Team");
 
     expect(await page.content()).toBe(before);
-    expect(messages).toHaveLength(20);
+    expect(messages).toHaveLength(23);
     expect(messages.map(({ id }) => id)).not.toContain("must-not-be-selected");
 
     const incoming = messages[0]!;
@@ -129,6 +129,19 @@ describe("parseRenderedMessages", () => {
     const quotedDocument = messages.find(({ id }) => id === "stable-quoted-document")!;
     expect(quotedDocument).toMatchObject({ text: "Reply to a document", media: null, reply: { sender: "Bob" } });
     expect(quotedDocument.reply).toEqual({ sender: "Bob" });
+
+    for (const [id, text] of [
+      ["stable-quoted-call", "Reply to a call"],
+      ["stable-quoted-deleted", "Reply to a deleted message"],
+      ["stable-quoted-system", "Reply to a system notice"],
+    ] as const) {
+      expect(messages.find((message) => message.id === id)).toMatchObject({
+        kind: "message",
+        direction: "incoming",
+        text,
+        reply: { sender: "Bob" },
+      });
+    }
 
     expect(messages.find(({ id }) => id === "stable-direct-no-sender")).toMatchObject({
       sender: "Synthetic Team",
@@ -191,6 +204,6 @@ describe("real tsx runtime", () => {
     ], { encoding: "utf8", timeout: 30_000 });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe("20");
+    expect(result.stdout).toBe("23");
   });
 });

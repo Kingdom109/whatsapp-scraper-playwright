@@ -334,9 +334,9 @@ const extractBrowserRows = new Function("rows", "selectors", String.raw`
       rowClass: row.getAttribute("class") ?? "",
       metadata: metadataElement?.getAttribute("data-pre-plain-text") ?? text(metadataElement),
       text: text(firstMatch(row, selectors.messageText, primaryTextExcluded)),
-      deletedText: text(firstMatch(row, selectors.deleted)),
-      systemText: text(firstMatch(row, selectors.system)),
-      callText: text(firstMatch(row, selectors.call)),
+      deletedText: text(firstMatch(row, selectors.deleted, quotedOrReaction)),
+      systemText: text(firstMatch(row, selectors.system, quotedOrReaction)),
+      callText: text(firstMatch(row, selectors.call, quotedOrReaction)),
       media,
       reply: replyElement === null ? null : {
         sender: text(firstMatch(replyElement, selectors.quotedSender)),
