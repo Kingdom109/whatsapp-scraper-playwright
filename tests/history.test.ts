@@ -375,7 +375,15 @@ describe("createPlaywrightHistoryAdapter", () => {
     await content('<div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"><div class="legacy-message"><span>private body</span></div></div>');
     const logs: string[] = [];
     page.on("console", (entry) => logs.push(entry.text()));
-    await page.evaluate(() => { setTimeout(() => document.querySelector(".legacy-message")?.setAttribute("data-history-marker", "changed"), 100); });
+    await page.evaluate(() => {
+      const container = document.querySelector('[data-testid="conversation-panel-messages"]');
+      container?.addEventListener("scroll", () => {
+        document.querySelector(".legacy-message")?.setAttribute("data-history-marker", "changed");
+      }, { once: true });
+      Object.defineProperty(container, "scrollBy", {
+        value: () => container.dispatchEvent(new Event("scroll")),
+      });
+    });
 
     const result = await createPlaywrightHistoryAdapter(page, "Chat", { kind: "messages", value: 2 }, NOW).scrollOlder();
 
