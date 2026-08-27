@@ -272,7 +272,10 @@ async function searchAndClickExact(
   throw new Error("Exact WhatsApp chat could not be safely opened before the search timeout");
 }
 
-async function verifyExactHeader(page: Page, expected: string): Promise<void> {
+export async function assertExactChatHeader(page: Page, requestedName: string): Promise<void> {
+  const expected = normalizeName(requestedName);
+  if (expected === "") throw new Error("WhatsApp chat name must not be blank");
+
   const deadline = deadlineAfter(HEADER_TIMEOUT_MS);
   let sawVisibleHeader = false;
   while (remainingMs(deadline) > 0) {
@@ -337,5 +340,5 @@ export async function openExactChat(page: Page, requestedName: string): Promise<
   if (expected === "") throw new Error("WhatsApp chat name must not be blank");
 
   await searchAndClickExact(page, expected, deadlineAfter(SEARCH_TIMEOUT_MS));
-  await verifyExactHeader(page, expected);
+  await assertExactChatHeader(page, expected);
 }

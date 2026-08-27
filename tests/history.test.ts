@@ -39,6 +39,7 @@ function adapter(
     now: NOW,
     maxCycles: 10,
     stallCycles: 2,
+    verifySelectedChat: async () => {},
     parseWindow: async () => windows[index] ?? windows.at(-1) ?? [],
     scrollOlder: async () => {
       const result = scrolls[scrollIndex++] ?? "stalled";
@@ -102,6 +103,112 @@ describe("loadHistory", () => {
     expect(result.warnings.join(" ")).toMatch(/only 2 available/i);
   });
 
+  it("aborts before parsing a different chat after a history-cycle chat check fails", async () => {
+    let parseCalls = 0;
+    const privateHeader = "PRIVATE-OTHER-CHAT";
+    const guarded = {
+      ...adapter([], [], { kind: "messages", value: 2 }, {
+        parseWindow: async () => {
+          parseCalls += 1;
+          return parseCalls === 1
+            ? [message("selected", "2026-08-04T10:00:00+03:00")]
+            : [message("other-chat", "2026-08-04T09:00:00+03:00")];
+        },
+        scrollOlder: async () => "moved",
+      }),
+      verifySelectedChat: async () => {
+        if (parseCalls > 0) throw new Error(privateHeader);
+      },
+    } as HistoryAdapter & { verifySelectedChat(): Promise<void> };
+
+    const error = await loadHistory(guarded).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Selected WhatsApp chat could not be verified during history loading.");
+    expect(parseCalls).toBe(1);
+    expect(inspect(error, { depth: null, showHidden: true })).not.toContain(privateHeader);
+  });
+
+  it("parses the final start viewport exactly once to satisfy a count boundary", async () => {
+    let viewport = 0;
+    let parseCalls = 0;
+    const result = await loadHistory(adapter([], [], { kind: "messages", value: 3 }, {
+      parseWindow: async () => {
+        parseCalls += 1;
+        return viewport === 0
+          ? [message("c", "2026-08-04T03:00:00+03:00")]
+          : [
+            message("a", "2026-08-04T01:00:00+03:00"),
+            message("b", "2026-08-04T02:00:00+03:00"),
+            message("c", "2026-08-04T03:00:00+03:00", "updated"),
+          ];
+      },
+      scrollOlder: async () => {
+        viewport = 1;
+        return "start";
+      },
+    }));
+
+    expect(result).toMatchObject({ complete: true, warnings: [] });
+    expect(result.messages.map(({ id }) => id)).toEqual(["a", "b", "c"]);
+    expect(result.messages.find(({ id }) => id === "c")?.text).toBe("updated");
+    expect(parseCalls).toBe(2);
+  });
+
+  it("parses a final start viewport outside the normal history-cycle budget", async () => {
+    let viewport = 0;
+    let parseCalls = 0;
+    let scrollCalls = 0;
+    const result = await loadHistory(adapter([], [], { kind: "messages", value: 2 }, {
+      maxCycles: 1,
+      parseWindow: async () => {
+        parseCalls += 1;
+        return viewport === 0
+          ? [message("b", "2026-08-04T02:00:00+03:00")]
+          : [
+            message("a", "2026-08-04T01:00:00+03:00"),
+            message("b", "2026-08-04T02:00:00+03:00", "updated"),
+          ];
+      },
+      scrollOlder: async () => {
+        scrollCalls += 1;
+        viewport = 1;
+        return "start";
+      },
+    }));
+
+    expect(result).toMatchObject({ complete: true, warnings: [] });
+    expect(result.messages.map(({ id }) => id)).toEqual(["a", "b"]);
+    expect(result.messages.find(({ id }) => id === "b")?.text).toBe("updated");
+    expect(parseCalls).toBe(2);
+    expect(scrollCalls).toBe(1);
+  });
+
+  it("parses the final start viewport exactly once before completing a day boundary", async () => {
+    let viewport = 0;
+    let parseCalls = 0;
+    const result = await loadHistory(adapter([], [], { kind: "days", value: 1 }, {
+      parseWindow: async () => {
+        parseCalls += 1;
+        return viewport === 0
+          ? [message("today", "2026-08-04T10:00:00+03:00")]
+          : [
+            message("old", "2026-08-02T23:59:59+03:00"),
+            message("today", "2026-08-04T10:00:00+03:00", "updated"),
+          ];
+      },
+      scrollOlder: async () => {
+        viewport = 1;
+        return "start";
+      },
+    }));
+
+    expect(result).toMatchObject({ complete: true, warnings: [] });
+    expect(result.messages.map(({ id }) => id)).toEqual(["today"]);
+    expect(result.messages[0]?.text).toBe("updated");
+    expect(parseCalls).toBe(2);
+  });
+
   it("returns partial after the configured number of repeated stalls", async () => {
     const result = await loadHistory(adapter([
       [message("a", "2026-08-04T10:00:00+03:00")],
@@ -130,7 +237,7 @@ describe("loadHistory", () => {
     expect(parseCalls).toBe(3);
   });
 
-  it("returns partial at max cycles without an extra scroll", async () => {
+  it("returns partial after its final allowed scroll when the boundary remains unreached", async () => {
     let scrollCalls = 0;
     const result = await loadHistory(adapter([
       [message("a", "2026-08-04T10:00:00+03:00")],
@@ -142,7 +249,7 @@ describe("loadHistory", () => {
 
     expect(result.complete).toBe(false);
     expect(result.warnings.join(" ")).toMatch(/maximum history-loading cycles/i);
-    expect(scrollCalls).toBe(1);
+    expect(scrollCalls).toBe(2);
   });
 
   it.each([
@@ -269,6 +376,31 @@ describe("createPlaywrightHistoryAdapter", () => {
     page = await browser.newPage();
     await page.setContent(`<main id="main">${inner}</main>`);
   }
+
+  it("fails closed when the selected header changes before the next history window", async () => {
+    await content('<header><span data-testid="conversation-info-header-chat-title" title="Chat">Chat</span></header>');
+    const adapter = createPlaywrightHistoryAdapter(page, "Chat", { kind: "messages", value: 2 }, NOW);
+    let parseCalls = 0;
+    adapter.parseWindow = async () => {
+      parseCalls += 1;
+      return [message("selected", "2026-08-04T10:00:00+03:00")];
+    };
+    adapter.scrollOlder = async () => {
+      await page.locator('[data-testid="conversation-info-header-chat-title"]').evaluate((header) => {
+        header.setAttribute("title", "PRIVATE-OTHER-CHAT");
+        header.textContent = "PRIVATE-OTHER-CHAT";
+      });
+      return "moved";
+    };
+
+    const error = await loadHistory(adapter).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Selected WhatsApp chat could not be verified during history loading.");
+    expect(parseCalls).toBe(1);
+    expect(inspect(error, { depth: null, showHidden: true })).not.toContain("PRIVATE-OTHER-CHAT");
+    await page.close();
+  });
 
   it("detects immediate upward movement without changing content", async () => {
     await content('<div data-testid="conversation-panel-messages" style="height:200px;overflow:auto"><div style="height:2000px"><div data-id="oldest"></div></div></div>');

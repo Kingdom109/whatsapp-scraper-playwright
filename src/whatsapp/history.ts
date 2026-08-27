@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright";
 import { boundaryReached, collectMessages } from "../collector.js";
 import type { MessageRecord, ScrapeLimit } from "../domain.js";
+import { assertExactChatHeader } from "./navigator.js";
 import { parseRenderedMessages } from "./parser.js";
 import { whatsappSelectors } from "./selectors.js";
 
@@ -11,6 +12,7 @@ export interface HistoryAdapter {
   now: Date;
   maxCycles: number;
   stallCycles: number;
+  verifySelectedChat(): Promise<void>;
   parseWindow(): Promise<MessageRecord[]>;
   scrollOlder(): Promise<ScrollResult>;
 }
@@ -50,12 +52,17 @@ function finish(
 }
 
 const stoppedWarning = "WhatsApp stopped loading older messages before the requested boundary.";
+const selectedChatWarning = "Selected WhatsApp chat could not be verified during history loading.";
 
 function sanitizedStageError(stage: "parsing" | "scrolling"): Error {
   const message = stage === "parsing"
     ? "Failed to parse rendered WhatsApp history."
     : "Failed to scroll WhatsApp history.";
   return new Error(message);
+}
+
+function sanitizedSelectedChatError(): Error {
+  return new Error(selectedChatWarning);
 }
 
 export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResult> {
@@ -67,8 +74,19 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
   let noProgressCycles = 0;
   let stalledScrolls = 0;
   let hasScrolled = false;
+  let finalViewportAtHistoryStart = false;
 
-  for (let cycle = 0; cycle < adapter.maxCycles; cycle += 1) {
+  for (
+    let cycle = 0;
+    cycle < adapter.maxCycles || finalViewportAtHistoryStart;
+    cycle += 1
+  ) {
+    try {
+      await adapter.verifySelectedChat();
+    } catch {
+      throw sanitizedSelectedChatError();
+    }
+
     let window: MessageRecord[];
     try {
       window = await adapter.parseWindow();
@@ -99,6 +117,19 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
       return finish(latestById, fallbackCollisions, adapter, true);
     }
 
+    if (finalViewportAtHistoryStart) {
+      if (adapter.limit.kind === "days") {
+        return finish(latestById, fallbackCollisions, adapter, true);
+      }
+      return finish(
+        latestById,
+        fallbackCollisions,
+        adapter,
+        false,
+        `Requested ${adapter.limit.value} messages, but only ${latestById.size} available in this chat.`,
+      );
+    }
+
     if (newIds > 0) {
       noProgressCycles = 0;
       stalledScrolls = 0;
@@ -107,16 +138,6 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
       if (noProgressCycles >= adapter.stallCycles) {
         return finish(latestById, fallbackCollisions, adapter, false, stoppedWarning);
       }
-    }
-
-    if (cycle + 1 >= adapter.maxCycles) {
-      return finish(
-        latestById,
-        fallbackCollisions,
-        adapter,
-        false,
-        "Maximum history-loading cycles reached before the requested boundary.",
-      );
     }
 
     let scrollResult: ScrollResult;
@@ -134,16 +155,9 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
     }
 
     if (scrollResult === "start") {
-      if (adapter.limit.kind === "days") {
-        return finish(latestById, fallbackCollisions, adapter, true);
-      }
-      return finish(
-        latestById,
-        fallbackCollisions,
-        adapter,
-        false,
-        `Requested ${adapter.limit.value} messages, but only ${latestById.size} available in this chat.`,
-      );
+      finalViewportAtHistoryStart = true;
+      hasScrolled = true;
+      continue;
     }
 
     if (scrollResult === "stalled") {
@@ -151,6 +165,16 @@ export async function loadHistory(adapter: HistoryAdapter): Promise<HistoryResul
       if (stalledScrolls >= adapter.stallCycles) {
         return finish(latestById, fallbackCollisions, adapter, false, stoppedWarning);
       }
+    }
+
+    if (cycle + 1 >= adapter.maxCycles) {
+      return finish(
+        latestById,
+        fallbackCollisions,
+        adapter,
+        false,
+        "Maximum history-loading cycles reached before the requested boundary.",
+      );
     }
     hasScrolled = true;
   }
@@ -241,6 +265,7 @@ export function createPlaywrightHistoryAdapter(
     now,
     maxCycles: 500,
     stallCycles: 3,
+    verifySelectedChat: () => assertExactChatHeader(page, chat),
     parseWindow: () => parseRenderedMessages(page, chat),
     async scrollOlder(): Promise<ScrollResult> {
       const container = await firstVisibleContainer(page);
