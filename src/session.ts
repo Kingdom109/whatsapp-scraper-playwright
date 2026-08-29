@@ -46,6 +46,13 @@ export interface WhatsAppSession {
   close(): Promise<void>;
 }
 
+export class ProfileInUseError extends Error {
+  constructor(pid?: number) {
+    super(pid === undefined ? "WhatsApp browser profile is already in use" : `already running as process ${pid}`);
+    this.name = "ProfileInUseError";
+  }
+}
+
 interface SessionDependencies {
   acquireLock?: typeof acquireProfileLock;
   launchPersistentContext?: BrowserType<ChromiumBrowser>["launchPersistentContext"];
@@ -314,7 +321,7 @@ async function reclaimStaleLock(
   try {
     const current = await readLockSnapshot(lockPath);
     if (current !== undefined && await ownerIsActive(current, dependencies)) {
-      throw new Error(`already running as process ${current.owner!.pid}`);
+      throw new ProfileInUseError(current.owner!.pid);
     }
     const cleanupError = await bestEffortUnlink(lockPath, dependencies);
     if (cleanupError !== undefined) throw cleanupError;
@@ -380,7 +387,7 @@ export async function __acquireProfileLock(
 
     const current = await readLockSnapshot(lockPath);
     if (current !== undefined && await ownerIsActive(current, dependencies)) {
-      throw new Error(`already running as process ${current.owner!.pid}`);
+      throw new ProfileInUseError(current.owner!.pid);
     }
     await reclaimStaleLock(
       lockPath,

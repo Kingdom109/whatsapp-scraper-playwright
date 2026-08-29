@@ -3,13 +3,18 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CliCommand } from "./domain.js";
+import {
+  OperationalFailure,
+  sanitizeOutcomeWarnings,
+  type CliCommand,
+  type CommandOutcome,
+} from "./domain.js";
 import { runCommand } from "./app.js";
 import { parseCommand } from "./options.js";
 
 export const CLI_NAME = "whatsapp-scrape";
 
-type CommandRunner = (command: CliCommand) => Promise<string | null>;
+type CommandRunner = (command: CliCommand) => Promise<CommandOutcome>;
 
 export async function main(
   argv = process.argv.slice(2),
@@ -24,13 +29,19 @@ export async function main(
   }
 
   try {
-    const output = await execute(command);
-    if (output !== null) process.stdout.write(`Export written to ${output}\n`);
-    return 0;
-  } catch {
-    process.stderr.write(
-      "WhatsApp extraction failed. Review private diagnostics if available.\n",
-    );
+    const outcome = await execute(command);
+    if (outcome.path !== null) process.stdout.write(`Export written to ${outcome.path}\n`);
+    if (!outcome.complete) process.stderr.write("Export is incomplete.\n");
+    for (const warning of sanitizeOutcomeWarnings(outcome.complete, outcome.warnings)) {
+      process.stderr.write(`Warning: ${warning}\n`);
+    }
+    return outcome.complete ? 0 : 2;
+  } catch (error) {
+    const failure = error instanceof OperationalFailure
+      ? error
+      : new OperationalFailure("unexpected");
+    process.stderr.write(`${failure.message}\n`);
+    if (failure.kind === "interrupted") return failure.signal === "SIGTERM" ? 143 : 130;
     return 1;
   }
 }

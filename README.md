@@ -39,7 +39,7 @@ Exactly one of `--days` or `--messages` is required, and each value must be a po
 
 `--days N` uses inclusive local calendar days: `--days 1` means since local midnight today; `--days 3` includes today and the two preceding local calendar days. `--messages N` retains the newest N unique messages in chronological order.
 
-If history stops loading, the boundary cannot be reached, or another safe stopping condition occurs, the tool writes the records it has when possible and marks the result incomplete. The export includes a warning, and the CLI reports the export path; an incomplete result must not be treated as a complete range.
+If history stops loading, the boundary cannot be reached, or another safe stopping condition occurs, the tool writes the records it has when possible and marks the result incomplete. The export includes a warning, and the CLI reports the export path plus an incomplete status. Incomplete scrapes exit with status `2`; they must not be treated as a complete range. Terminal warnings are fixed, content-free summaries—review the local export for details.
 
 ## What is captured
 
@@ -67,6 +67,8 @@ This program is read-only. It does not send messages, add reactions, edit or del
 - **History stalled or result is incomplete:** check the warning in the export. Retry with a smaller boundary; the tool will not claim the requested range was reached when it was not.
 - **Unexpected WhatsApp interface error:** retry first. If it persists, add `--diagnostics` to a scrape and review the private artifacts locally before sharing.
 - **Browser executable missing:** rerun `npm.cmd exec playwright install chromium`, then `npm.cmd run build`.
+
+During an active run, `Ctrl+C` or a termination signal closes the persistent browser session once before the tool exits. `SIGINT` exits with status `130`; `SIGTERM` exits with status `143`. If shutdown cannot be confirmed, the tool exits with status `1`; close the visible browser before retrying.
 
 ## Automated checks
 

@@ -23,6 +23,9 @@ These checks require a user-authorized WhatsApp account and a low-sensitivity ch
 - [ ] Image/document/voice-note examples show the correct media type and visible metadata.
 - [ ] JSON output parses with `Get-Content -Raw <file> | ConvertFrom-Json`.
 - [ ] A nonexistent chat exits nonzero without opening another chat.
+- [ ] An intentionally incomplete boundary writes an export, visibly reports that it is incomplete without printing chat content, and exits with status `2`.
+- [ ] Interrupting an active run closes the dedicated browser session and exits with status `130` for `Ctrl+C` or `143` for `SIGTERM`.
+- [ ] If browser shutdown reports a failure, the terminal says shutdown could not be confirmed, exits with status `1`, and the visible browser is closed before retrying.
 - [ ] No message, reaction, edit, delete, or media download occurs.
 
 ## Privacy boundary
