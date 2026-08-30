@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { parseCommand } from "../src/options.js";
+import { parseBatchCommands, parseCommand } from "../src/options.js";
+
+describe("parseBatchCommands", () => {
+  it("builds multiple exact-chat scrapes with shared options", () => {
+    expect(parseBatchCommands(["Events A", "Events B", "--days", "7", "--format", "json"])).toEqual([
+      { kind: "scrape", chat: "Events A", limit: { kind: "days", value: 7 }, format: "json", diagnostics: false },
+      { kind: "scrape", chat: "Events B", limit: { kind: "days", value: 7 }, format: "json", diagnostics: false },
+    ]);
+  });
+});
 
 describe("parseCommand", () => {
   it("parses login when it is the sole argument", () => {

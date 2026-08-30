@@ -1,5 +1,13 @@
 # WhatsApp Chat Scraper Design
 
+## 2026-08-29 live-test addendum
+
+The authorized live test showed that event posters frequently arrive as images with no usable caption or filename. Media type alone cannot support event discovery. The scraper therefore captures each rendered image, GIF, sticker, or video preview from an explicitly selected chat as a local PNG and includes its absolute path in the Markdown/JSON record. It does not fetch original-quality attachments or download audio, voice-note, or document bodies.
+
+For multi-chat work, Chromium remains open for the full batch: login once, process exact chat names sequentially, capture any rendered poster before leaving the chat, and close only after the batch finishes. Loading is polled while the selected conversation visibly reports loading or synchronization. WhatsApp's explicit “See more chat history on the app” state is treated as unavailable web history rather than an endless load.
+
+Relevant-chat discovery uses a title-only inventory. It traverses the virtualized active list and archived list independently until both scroll position and discovered-title set stabilize. Inventory never extracts messages; message extraction remains limited to the exact chats subsequently selected by the user or Codex.
+
 Date: 2026-08-04
 Status: Approved
 

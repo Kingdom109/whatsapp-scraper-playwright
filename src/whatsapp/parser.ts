@@ -1,4 +1,6 @@
 import type { Page } from "playwright";
+import { mkdir, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fallbackMessageId } from "../collector.js";
 import type {
   Direction,
@@ -362,7 +364,19 @@ const extractBrowserRows = new Function("rows", "selectors", String.raw`
   });
 `) as BrowserRowExtractor;
 
-export async function parseRenderedMessages(page: Page, chat: string): Promise<MessageRecord[]> {
+export interface ParseRenderedMessagesOptions {
+  mediaDirectory?: string;
+}
+
+function safeMediaId(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120) || "media";
+}
+
+export async function parseRenderedMessages(
+  page: Page,
+  chat: string,
+  options: ParseRenderedMessagesOptions = {},
+): Promise<MessageRecord[]> {
   const rowSelector = await firstMatchingRowSelector(page);
   if (rowSelector === null) return [];
 
@@ -374,5 +388,44 @@ export async function parseRenderedMessages(page: Page, chat: string): Promise<M
   ]);
   const context: MetadataContext = { dateOrder: dateOrderFromPartTypes(datePartTypes) };
 
-  return rawMessages.map((raw) => mapRawMessage(raw, chat, context));
+  const messages = rawMessages.map((raw) => mapRawMessage(raw, chat, context));
+  if (options.mediaDirectory !== undefined) {
+    const directory = resolve(options.mediaDirectory);
+    await mkdir(directory, { recursive: true });
+    const rows = page.locator(rowSelector);
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]!;
+      const raw = rawMessages[index]!;
+      const media = message.media;
+      if (media === null) continue;
+      const captureType = media.type === "image" || media.type === "gif"
+        || media.type === "sticker" || media.type === "video"
+        ? media.type
+        : null;
+      if (captureType === null) continue;
+      const row = rows.nth(index);
+      const currentId = await row.getAttribute("data-id").catch(() => null);
+      if (raw.id === null || currentId !== raw.id) {
+        message.warnings.push("Rendered media row changed before local capture.");
+        continue;
+      }
+      const candidates = whatsappSelectors.media[captureType];
+      const element = row.locator(candidates.join(",")).first();
+      if (!await element.isVisible().catch(() => false)) continue;
+      const localPath = join(directory, `${safeMediaId(message.id)}.png`);
+      try {
+        await element.screenshot({ path: localPath });
+        const capturedId = await row.getAttribute("data-id").catch(() => null);
+        if (capturedId !== raw.id) {
+          await rm(localPath, { force: true }).catch(() => undefined);
+          message.warnings.push("Rendered media row changed before local capture.");
+          continue;
+        }
+        media.localPath = localPath;
+      } catch {
+        message.warnings.push("Rendered media could not be saved locally.");
+      }
+    }
+  }
+  return messages;
 }

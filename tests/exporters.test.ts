@@ -94,6 +94,17 @@ afterEach(async () => {
 });
 
 describe("renderMarkdown", () => {
+  it("includes the exact local media path for AI inspection", () => {
+    const markdown = renderMarkdown(result({
+      messages: [message("poster", "2026-08-29T20:00:00+03:00", {
+        text: null,
+        media: { type: "image", localPath: "C:\\exports\\media\\poster.png" },
+      })],
+    }));
+
+    expect(markdown).toContain("C:\\\\exports\\\\media\\\\poster.png");
+  });
+
   it("renders compact Unicode Markdown with metadata, dates, multiline text, and media", () => {
     const markdown = renderMarkdown(result());
 

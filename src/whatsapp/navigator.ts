@@ -158,7 +158,7 @@ async function tryActivatePinnedExact(
   const remaining = remainingMs(deadline);
   if (remaining <= 0) return "blocked";
   try {
-    return await sample.handle.evaluate((element, expectedName): ActivationStatus => {
+    const activation = await sample.handle.evaluate((element, expectedName): ActivationStatus => {
       if (!(element instanceof HTMLElement) || !element.isConnected) return "stale";
       const attributeName = (element.getAttribute("title") ?? "")
         .replace(/[\p{White_Space}]+/gu, " ")
@@ -191,9 +191,60 @@ async function tryActivatePinnedExact(
       const hit = document.elementFromPoint(centerX, centerY);
       if (hit === null || (hit !== element && !element.contains(hit))) return "blocked";
 
-      element.click();
       return "clicked";
     }, expected);
+    if (activation !== "clicked") return activation;
+    if (await readPinnedTitle(sample.handle) !== expected) return "stale";
+    await sample.handle.evaluate((element, expectedName) => {
+      type GuardedElement = Element & {
+        __whatsappScraperExactClickGuard?: {
+          accepted: boolean;
+          controller: AbortController;
+        };
+      };
+      const guarded = element as GuardedElement;
+      guarded.__whatsappScraperExactClickGuard?.controller.abort();
+      const controller = new AbortController();
+      const state = { accepted: false, controller };
+      guarded.__whatsappScraperExactClickGuard = state;
+      document.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        const target = event.target;
+        const attributeName = (guarded.getAttribute("title") ?? "")
+          .replace(/[\p{White_Space}]+/gu, " ")
+          .trim();
+        const currentName = attributeName !== ""
+          ? attributeName
+          : (guarded.textContent ?? "").replace(/[\p{White_Space}]+/gu, " ").trim();
+        const targetMatches = target instanceof Node
+          && (target === guarded || guarded.contains(target));
+        state.accepted = guarded.isConnected && targetMatches && currentName === expectedName;
+        if (!state.accepted) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, { capture: true, signal: controller.signal });
+    }, expected);
+
+    let accepted = false;
+    try {
+      await sample.handle.click({ timeout: remainingMs(deadline) });
+    } finally {
+      accepted = await sample.handle.evaluate((element) => {
+        type GuardedElement = Element & {
+          __whatsappScraperExactClickGuard?: {
+            accepted: boolean;
+            controller: AbortController;
+          };
+        };
+        const guarded = element as GuardedElement;
+        const state = guarded.__whatsappScraperExactClickGuard;
+        state?.controller.abort();
+        delete guarded.__whatsappScraperExactClickGuard;
+        return state?.accepted ?? false;
+      }).catch(() => false);
+    }
+    return accepted ? "clicked" : "stale";
   } catch (error) {
     if (page.isClosed()) throw error;
     return "stale";
@@ -205,6 +256,7 @@ async function searchAndClickExact(
   expected: string,
   deadline: Deadline,
 ): Promise<void> {
+  const resultWaitMs = remainingMs(deadline);
   const beforeFill = await sampleVisibleTitles(page, deadline);
   const beforeSignature = titleSignature(beforeFill);
   await disposeSamples(beforeFill);
@@ -223,6 +275,8 @@ async function searchAndClickExact(
   } finally {
     await safelyDispose([search]);
   }
+
+  deadline = deadlineAfter(resultWaitMs);
 
   let lastSignature: string | undefined;
   let unchangedSince = Date.now();
@@ -272,11 +326,15 @@ async function searchAndClickExact(
   throw new Error("Exact WhatsApp chat could not be safely opened before the search timeout");
 }
 
-export async function assertExactChatHeader(page: Page, requestedName: string): Promise<void> {
+export async function assertExactChatHeader(
+  page: Page,
+  requestedName: string,
+  timeoutMs = HEADER_TIMEOUT_MS,
+): Promise<void> {
   const expected = normalizeName(requestedName);
   if (expected === "") throw new Error("WhatsApp chat name must not be blank");
 
-  const deadline = deadlineAfter(HEADER_TIMEOUT_MS);
+  const deadline = deadlineAfter(timeoutMs);
   let sawVisibleHeader = false;
   while (remainingMs(deadline) > 0) {
     const header = await firstVisibleHandle(page, whatsappSelectors.chatHeaderTitle, deadline);
@@ -335,10 +393,56 @@ export async function ensureLoggedIn(
   throw new Error("WhatsApp login did not complete before the timeout");
 }
 
-export async function openExactChat(page: Page, requestedName: string): Promise<void> {
+export async function openExactChat(
+  page: Page,
+  requestedName: string,
+  options: { searchTimeoutMs?: number; headerTimeoutMs?: number } = {},
+): Promise<void> {
   const expected = normalizeName(requestedName);
   if (expected === "") throw new Error("WhatsApp chat name must not be blank");
 
-  await searchAndClickExact(page, expected, deadlineAfter(SEARCH_TIMEOUT_MS));
-  await assertExactChatHeader(page, expected);
+  await searchAndClickExact(page, expected, deadlineAfter(options.searchTimeoutMs ?? SEARCH_TIMEOUT_MS));
+  await assertExactChatHeader(page, expected, options.headerTimeoutMs ?? HEADER_TIMEOUT_MS);
+}
+
+async function anyVisible(page: Page, selectors: readonly string[]): Promise<boolean> {
+  for (const selector of selectors) {
+    const nodes = page.locator(selector);
+    for (let index = 0; index < await nodes.count(); index += 1) {
+      if (await nodes.nth(index).isVisible().catch(() => false)) return true;
+    }
+  }
+  return false;
+}
+
+async function visibleText(page: Page, scope: string, pattern: RegExp): Promise<boolean> {
+  const nodes = page.locator(scope).getByText(pattern);
+  for (let index = 0; index < await nodes.count(); index += 1) {
+    if (await nodes.nth(index).isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+export async function waitForChatContent(
+  page: Page,
+  options: { quietMs?: number; pollMs?: number } = {},
+): Promise<"ready" | "unavailable"> {
+  const quietMs = options.quietMs ?? 5_000;
+  const pollMs = options.pollMs ?? 250;
+  let quietSince: number | undefined;
+  for (;;) {
+    const loading = await visibleText(page, "#main", /loading|syncing older messages/i);
+    const hasContent =
+      await anyVisible(page, whatsappSelectors.messageRows)
+      || await anyVisible(page, whatsappSelectors.historyStart);
+    if (hasContent && !loading) return "ready";
+    if (await visibleText(page, "body", /See more chat history on the app/i)) return "unavailable";
+    if (loading) {
+      quietSince = undefined;
+    } else {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= quietMs) return "unavailable";
+    }
+    await page.waitForTimeout(pollMs);
+  }
 }

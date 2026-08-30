@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -71,6 +73,91 @@ describe("parseDisplayedMetadata", () => {
 });
 
 describe("parseRenderedMessages", () => {
+  it("captures a rendered image locally and records its exact path", async () => {
+    const mediaDirectory = await mkdtemp(join(tmpdir(), "whatsapp-media-"));
+    const mediaPage = await browser.newPage({ locale: "en-GB" });
+    try {
+      await mediaPage.setContent(`
+        <main id="main">
+          <div data-testid="msg-container" data-id="poster-1" class="message-in">
+            <span data-pre-plain-text="[8:30 PM, 29/8/2026] Events Admin:"></span>
+            <img data-testid="image-message" alt="event poster" style="width:120px;height:80px"
+              src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3Crect width='120' height='80' fill='purple'/%3E%3C/svg%3E">
+          </div>
+        </main>
+      `);
+
+      const [message] = await parseRenderedMessages(mediaPage, "Events", { mediaDirectory });
+
+      expect(message?.media?.localPath).toMatch(/poster-1\.png$/);
+      await expect(stat(message!.media!.localPath!)).resolves.toMatchObject({ size: expect.any(Number) });
+    } finally {
+      await mediaPage.close();
+      await rm(mediaDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not capture media from a row recycled after parsing", async () => {
+    const mediaDirectory = await mkdtemp(join(tmpdir(), "whatsapp-media-"));
+    const mediaPage = await browser.newPage({ locale: "en-GB" });
+    try {
+      await mediaPage.setContent(`
+        <main id="main"><div id="row" data-testid="msg-container" class="message-in">
+          <span data-pre-plain-text="[8:30 PM, 29/8/2026] Events Admin:"></span>
+          <img data-testid="image-message" style="width:120px;height:80px"
+            src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3C/svg%3E">
+        </div></main>
+      `);
+      await mediaPage.evaluate(() => {
+        const row = document.querySelector('#row')!;
+        const original = row.getAttribute.bind(row);
+        let idReads = 0;
+        row.getAttribute = (name: string) => name === "data-id"
+          ? (idReads++ === 0 ? "poster-1" : "poster-2")
+          : original(name);
+      });
+
+      const [message] = await parseRenderedMessages(mediaPage, "Events", { mediaDirectory });
+
+      expect(message?.media?.localPath).toBeUndefined();
+      expect(message?.warnings).toContain("Rendered media row changed before local capture.");
+    } finally {
+      await mediaPage.close();
+      await rm(mediaDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a media capture when the row recycles during the screenshot", async () => {
+    const mediaDirectory = await mkdtemp(join(tmpdir(), "whatsapp-media-"));
+    const mediaPage = await browser.newPage({ locale: "en-GB" });
+    try {
+      await mediaPage.setContent(`
+        <main id="main"><div id="row" data-testid="msg-container" class="message-in">
+          <span data-pre-plain-text="[8:30 PM, 29/8/2026] Events Admin:"></span>
+          <img data-testid="image-message" style="width:120px;height:80px"
+            src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3C/svg%3E">
+        </div></main>
+      `);
+      await mediaPage.evaluate(() => {
+        const row = document.querySelector('#row')!;
+        const original = row.getAttribute.bind(row);
+        let idReads = 0;
+        row.getAttribute = (name: string) => name === "data-id"
+          ? (++idReads <= 2 ? "poster-1" : "poster-2")
+          : original(name);
+      });
+
+      const [message] = await parseRenderedMessages(mediaPage, "Events", { mediaDirectory });
+
+      expect(message?.media?.localPath).toBeUndefined();
+      expect(message?.warnings).toContain("Rendered media row changed before local capture.");
+      await expect(stat(join(mediaDirectory, "poster-1.png"))).rejects.toThrow();
+    } finally {
+      await mediaPage.close();
+      await rm(mediaDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("maps the first matching row selector in DOM order without mutating the page", async () => {
     const before = await page.content();
     const messages = await parseRenderedMessages(page, "Synthetic Team");

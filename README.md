@@ -1,6 +1,6 @@
 # WhatsApp Chat Scraper
 
-Local, read-only extraction from one explicitly named chat in a user-authorized WhatsApp Web account. The tool produces AI-friendly Markdown by default and can produce JSON on request. Version 1 records visible media metadata; it does not download or analyze media.
+Local, read-only extraction from explicitly named chats in a user-authorized WhatsApp Web account. The tool produces AI-friendly Markdown by default and can produce JSON on request. Rendered image, GIF, sticker, and video previews are saved locally so an AI can inspect event posters.
 
 ## Requirements and setup
 
@@ -37,13 +37,31 @@ node dist/cli.js "David Cohen" --messages 200 --format json
 
 Exactly one of `--days` or `--messages` is required, and each value must be a positive integer. `--format md` is the default; `--format json` selects JSON. Files are written beneath `exports/` without overwriting an existing export.
 
+## Inventory and scrape several chats in one browser session
+
+Create complete active and archived chat-title inventories by traversing both virtualized lists to a stable bottom:
+
+```powershell
+node dist/inventory-cli.js
+```
+
+The inventory is written beneath `exports/`. It contains chat titles only. Review it locally and select the authorized chats you want to scrape.
+
+Scrape several exact chat names without closing or reopening Chromium between them:
+
+```powershell
+node dist/batch-cli.js "Community Events" "Local Announcements" --days 7 --format json
+```
+
+The batch logs in once, keeps the same Playwright session open, captures each chat sequentially, and closes only after the batch finishes. A failure in one chat does not discard successful exports from the others.
+
 `--days N` uses inclusive local calendar days: `--days 1` means since local midnight today; `--days 3` includes today and the two preceding local calendar days. `--messages N` retains the newest N unique messages in chronological order.
 
 If history stops loading, the boundary cannot be reached, or another safe stopping condition occurs, the tool writes the records it has when possible and marks the result incomplete. The export includes a warning, and the CLI reports the export path plus an incomplete status. Incomplete scrapes exit with status `2`; they must not be treated as a complete range. Terminal warnings are fixed, content-free summaries—review the local export for details.
 
 ## What is captured
 
-Records include sender, local ISO timestamp when determinable, direction, text, message kind, and visible reply/reaction information when reliable. For media, the export can include the visible type (image, video, audio, voice note, document, GIF, or sticker) plus visible caption, filename, duration, or size. The scraper does not download images, video, audio, voice notes, stickers, or documents.
+Records include sender, local ISO timestamp when determinable, direction, text, message kind, and visible reply/reaction information when reliable. For media, the export includes the visible type (image, video, audio, voice note, document, GIF, or sticker) plus visible caption, filename, duration, or size. When WhatsApp renders an image, GIF, sticker, or video preview, the scraper saves that rendered element as a local PNG beneath `exports/media/` and includes its exact absolute `localPath` in Markdown and JSON. This is a local visual capture, not an original-quality attachment download; audio, voice notes, and document bodies are not downloaded.
 
 ## Diagnostics and sensitive data
 
@@ -57,7 +75,7 @@ Screenshots and DOM snapshots may contain private visible chat content. The `.wh
 
 ## Safety boundaries
 
-This program is read-only. It does not send messages, add reactions, edit or delete messages, or download media. It extracts only the one exact chat named on the command line and does not enumerate or scrape unrelated chats. Use it only for chats you are authorized to access.
+This program is read-only. It does not send messages, add reactions, edit or delete messages. Single and batch scraping open only exact chat names supplied on the command line. The inventory command enumerates active and archived chat titles but does not extract their messages. Rendered media previews are captured locally only while processing an explicitly selected chat. Use it only for chats you are authorized to access.
 
 ## Troubleshooting
 

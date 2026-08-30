@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "whatsapp-scrape": "dist/cli.js" },
+  "bin": {
+    "whatsapp-scrape": "dist/cli.js",
+    "whatsapp-scrape-batch": "dist/batch-cli.js",
+    "whatsapp-chat-inventory": "dist/inventory-cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",

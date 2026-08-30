@@ -9,6 +9,7 @@ export interface MediaInfo {
   filename?: string;
   duration?: string;
   size?: string;
+  localPath?: string;
 }
 export interface ReplyInfo { sender?: string; text?: string; }
 export interface ReactionInfo { emoji: string; count: number; }

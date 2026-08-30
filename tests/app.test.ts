@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runCommand, type AppDependencies } from "../src/app.js";
+import { runBatchScrapes, runCommand, type AppDependencies } from "../src/app.js";
 import { captureDiagnostic } from "../src/diagnostics.js";
 import { main } from "../src/cli.js";
 import { OperationalFailure } from "../src/domain.js";
@@ -24,6 +24,7 @@ function dependencies(events: string[]): AppDependencies {
     },
     ensureLogin: async () => { events.push("login"); },
     openChat: async () => { events.push("chat"); },
+    waitForContent: async () => "ready",
     createAdapter: () => {
       events.push("adapter");
       return {
@@ -52,6 +53,31 @@ function dependencies(events: string[]): AppDependencies {
 }
 
 describe("runCommand", () => {
+  it("scrapes multiple chats through one login and one browser session", async () => {
+    const events: string[] = [];
+    const deps = dependencies(events);
+    deps.openChat = async (_page, chat) => { events.push(`chat:${chat}`); };
+    deps.write = async (result) => {
+      events.push(`export:${result.chat}`);
+      return `exports/${result.chat}.json`;
+    };
+
+    const results = await runBatchScrapes([
+      { kind: "scrape", chat: "Events A", limit: { kind: "days", value: 7 }, format: "json", diagnostics: false },
+      { kind: "scrape", chat: "Events B", limit: { kind: "days", value: 7 }, format: "json", diagnostics: false },
+    ], deps);
+
+    expect(results.map(({ chat, outcome }) => ({ chat, path: outcome?.path }))).toEqual([
+      { chat: "Events A", path: "exports/Events A.json" },
+      { chat: "Events B", path: "exports/Events B.json" },
+    ]);
+    expect(events.filter((event) => event === "open")).toHaveLength(1);
+    expect(events.filter((event) => event === "login")).toHaveLength(1);
+    expect(events.filter((event) => event === "close")).toHaveLength(1);
+    expect(events).toContain("chat:Events A");
+    expect(events).toContain("chat:Events B");
+  });
+
   it("runs a scrape in lifecycle order and closes the session", async () => {
     const events: string[] = [];
 

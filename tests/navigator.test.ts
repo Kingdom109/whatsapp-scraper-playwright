@@ -5,6 +5,7 @@ import {
   ChatNotFoundError,
   ensureLoggedIn,
   openExactChat,
+  waitForChatContent,
   waitForWhatsAppReady,
 } from "../src/whatsapp/navigator.js";
 
@@ -53,6 +54,119 @@ afterEach(async () => {
 });
 
 describe("openExactChat", () => {
+  it("opens an exact result through WhatsApp's input-based search control", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" aria-label="Search or start a new chat"
+          oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          <span data-testid="cell-frame-title" title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await page.locator("#search").inputValue()).toBe("Team");
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("opens an exact result exposed as a plain titled span", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" aria-label="Search or start a new chat"
+          oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("prefers the exact titled span when its legacy container includes an unread prefix", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" aria-label="Search or start a new chat"
+          oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button data-testid="cell-frame-title" data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          3 unread messages<span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("uses a trusted pointer click to activate the exact result", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onclick="if(!event.isTrusted)return;this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team");
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("blocks a trusted click when pointer activity recycles the exact row", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onpointerover="const title=this.querySelector('[title]');title.title='Other';title.textContent='Other'"
+          onclick="this.dataset.clicked='1'">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await expect(openExactChat(page, "Team")).rejects.toThrow();
+
+    expect(await clickCounts()).toEqual(["0"]);
+  });
+
+  it("waits for a conversation header rendered after one second", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3" oninput="document.querySelector('[data-pre-search]')?.remove()">
+        <span data-pre-search title="Before search">Before search</span>
+        <button data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';setTimeout(() => {const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'}, 1500)">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team", { headerTimeoutMs: 3_000 });
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
   it("opens the one exact result among partial matches", async () => {
     await page.setContent(navigationHtml([
       { title: "Team Archive" },
@@ -161,6 +275,46 @@ describe("openExactChat", () => {
 
     expect(await clickCounts()).toEqual(["1"]);
   });
+
+  it("waits for a live-style search result that appears after two seconds", async () => {
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3"
+          oninput="document.querySelector('[data-pre-search]').remove();setTimeout(() => document.querySelector('[data-row]').style.display='block', 2200)">
+        <span data-pre-search data-testid="cell-frame-title" title="Before search">Before search</span>
+        <button style="display:none" data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+
+    await openExactChat(page, "Team", { searchTimeoutMs: 5_000 });
+
+    expect(await clickCounts()).toEqual(["1"]);
+  });
+
+  it("gives search results a full wait budget after inspecting a busy chat list", async () => {
+    const preSearchRows = Array.from({ length: 100 }, (_, index) =>
+      `<span data-pre-search title="Before ${index}">Before ${index}</span>`,
+    ).join("");
+    await page.setContent(`
+      <div id="side">
+        <input id="search" role="textbox" data-tab="3"
+          oninput="document.querySelectorAll('[data-pre-search]').forEach((node) => node.remove());setTimeout(() => document.querySelector('[data-row]').style.display='block', 4200)">
+        ${preSearchRows}
+        <button style="display:none" data-row="0" data-clicked="0"
+          onclick="this.dataset.clicked='1';const h=document.querySelector('[data-testid=conversation-info-header-chat-title]');h.setAttribute('title','Team');h.textContent='Team'">
+          <span title="Team">Team</span>
+        </button>
+      </div>
+      <div id="main"><header><span data-testid="conversation-info-header-chat-title" title="">Unopened</span></header></div>
+    `);
+    await openExactChat(page, "Team", { searchTimeoutMs: 6_000 });
+
+    expect(await clickCounts()).toEqual(["1"]);
+  }, 10_000);
 
   it("does not settle on stale pre-fill partial results", async () => {
     await page.setContent(`
@@ -374,6 +528,48 @@ describe("openExactChat", () => {
   });
 });
 
+describe("waitForChatContent", () => {
+  it("keeps polling while the selected conversation reports syncing", async () => {
+    await page.setContent('<div id="main"><span id="loading">Syncing older messages</span></div>');
+    await page.evaluate(() => setTimeout(() => {
+      document.querySelector('#loading')?.remove();
+      document.querySelector('#main')!.insertAdjacentHTML('beforeend', '<div data-testid="msg-container">Ready</div>');
+    }, 75));
+
+    await expect(waitForChatContent(page, { quietMs: 10 })).resolves.toBe("ready");
+  });
+
+  it("does not admit stale rendered rows while the selected conversation is syncing", async () => {
+    await page.setContent(`
+      <div id="main">
+        <span id="loading">Syncing older messages</span>
+        <div data-testid="msg-container">Previous chat row</div>
+      </div>
+    `);
+    let settled = false;
+    const waiting = waitForChatContent(page, { quietMs: 10, pollMs: 10 })
+      .then((result) => { settled = true; return result; });
+
+    await page.waitForTimeout(30);
+    expect(settled).toBe(false);
+    await page.locator("#loading").evaluate((element) => element.remove());
+
+    await expect(waiting).resolves.toBe("ready");
+  });
+
+  it("recognizes WhatsApp's app-only history state without waiting indefinitely", async () => {
+    await page.setContent('<div id="main">Syncing older messages</div><div>See more chat history on the app</div>');
+
+    await expect(waitForChatContent(page, { quietMs: 10 })).resolves.toBe("unavailable");
+  });
+
+  it("prefers rendered messages over the general app-history banner", async () => {
+    await page.setContent('<div id="main"><div data-testid="msg-container">Current message</div></div><div>See more chat history on the app</div>');
+
+    await expect(waitForChatContent(page, { quietMs: 10 })).resolves.toBe("ready");
+  });
+});
+
 describe("waitForWhatsAppReady", () => {
   it("returns ready when an app-ready candidate is visible", async () => {
     await page.setContent('<div id="main">ready</div>');
@@ -384,7 +580,7 @@ describe("waitForWhatsAppReady", () => {
   it("returns login-required when a QR candidate is visible", async () => {
     await page.setContent('<div id="app"><canvas aria-label="Scan QR code"></canvas></div>');
 
-    await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("login-required");
+    await expect(waitForWhatsAppReady(page, 500)).resolves.toBe("login-required");
   });
 
   it("prefers ready when ready and QR candidates are both visible", async () => {
@@ -396,7 +592,7 @@ describe("waitForWhatsAppReady", () => {
   it("returns login-required when app-ready markup is hidden and QR is visible", async () => {
     await page.setContent('<div id="main" style="display:none">ready</div><div id="app"><canvas aria-label="QR code"></canvas></div>');
 
-    await expect(waitForWhatsAppReady(page, 100)).resolves.toBe("login-required");
+    await expect(waitForWhatsAppReady(page, 500)).resolves.toBe("login-required");
   });
 
   it("returns ready when app-ready markup is visible and QR is hidden", async () => {
@@ -427,10 +623,10 @@ describe("ensureLoggedIn", () => {
     await page.setContent('<div id="app"><canvas aria-label="QR code"></canvas></div>');
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await page.evaluate(() => {
-      setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="main">ready</div>'), 35);
+      setTimeout(() => document.body.insertAdjacentHTML("beforeend", '<div id="main">ready</div>'), 500);
     });
 
-    await ensureLoggedIn(page, 150);
+    await ensureLoggedIn(page, 1_500);
 
     expect(stderr).toHaveBeenCalledOnce();
     expect(String(stderr.mock.calls[0]?.[0])).toMatch(/scan.*visible.*QR code/i);
@@ -440,7 +636,7 @@ describe("ensureLoggedIn", () => {
     await page.setContent('<div id="app"><canvas aria-label="QR code"></canvas><p>PRIVATE-LOGIN-CONTENT</p></div>');
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
-    const error = await ensureLoggedIn(page, 50).catch((caught: unknown) => caught);
+    const error = await ensureLoggedIn(page, 1_500).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain("WhatsApp login");

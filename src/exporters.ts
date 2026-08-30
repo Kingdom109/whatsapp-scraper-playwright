@@ -182,13 +182,13 @@ function projectRequest(value: unknown, active: WeakSet<object>): ScrapeLimit {
 }
 
 function projectMedia(value: unknown, path: string, active: WeakSet<object>): MediaInfo {
-  const allowed = ["type", "caption", "filename", "duration", "size"] as const;
+  const allowed = ["type", "caption", "filename", "duration", "size", "localPath"] as const;
   const object = ownDataDescriptors(value, path, allowed, ["type"], active);
   try {
     const type = descriptorValue(object.descriptors, "type");
     if (typeof type !== "string" || !mediaTypes.has(type as MediaType)) invalid(`${path}.type is invalid`);
     const media: MediaInfo = { type: type as MediaType };
-    for (const key of ["caption", "filename", "duration", "size"] as const) {
+    for (const key of ["caption", "filename", "duration", "size", "localPath"] as const) {
       if (key in object.descriptors) media[key] = requireString(descriptorValue(object.descriptors, key), `${path}.${key}`);
     }
     return media;
@@ -313,7 +313,7 @@ function escapeInline(value: string): string {
 }
 
 function mediaLabel(media: MediaInfo): string {
-  const fields = [media.type, media.filename, media.caption, media.duration, media.size]
+  const fields = [media.type, media.filename, media.caption, media.duration, media.size, media.localPath]
     .filter((field): field is string => typeof field === "string" && field.length > 0)
     .map(escapeInline);
   return `[${fields.join(" - ")}]`;

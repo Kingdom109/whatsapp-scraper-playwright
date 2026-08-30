@@ -4,8 +4,11 @@ export const whatsappSelectors = {
   searchBox: [
     '#side [contenteditable="true"][data-tab="3"]',
     '#side [role="textbox"][contenteditable="true"]',
+    '#side input[role="textbox"][data-tab="3"]',
   ],
   chatTitles: [
+    '#side [data-testid="cell-frame-title"] span[title]',
+    '#side span[title]',
     '#side [data-testid="cell-frame-title"]',
     '#side [title][role="gridcell"]',
   ],

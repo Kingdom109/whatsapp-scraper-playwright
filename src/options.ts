@@ -79,3 +79,30 @@ export function parseCommand(args: string[]): CliCommand {
     diagnostics: values.diagnostics ?? false,
   };
 }
+
+export function parseBatchCommands(args: string[]): Array<Extract<CliCommand, { kind: "scrape" }>> {
+  const { values, positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {
+      days: { type: "string" },
+      messages: { type: "string" },
+      format: { type: "string" },
+      diagnostics: { type: "boolean" },
+    },
+  });
+  if (positionals.length === 0 || positionals.some((chat) => chat.trim() === "")) {
+    throw new Error("at least one nonblank chat is required");
+  }
+  const shared: string[] = [];
+  if (values.days !== undefined) shared.push("--days", values.days);
+  if (values.messages !== undefined) shared.push("--messages", values.messages);
+  if (values.format !== undefined) shared.push("--format", values.format);
+  if (values.diagnostics === true) shared.push("--diagnostics");
+  return positionals.map((chat) => {
+    const command = parseCommand([chat, ...shared]);
+    if (command.kind !== "scrape") throw new Error("batch commands must be scrapes");
+    return command;
+  });
+}

@@ -21,12 +21,15 @@ import {
   ChatNotFoundError,
   ensureLoggedIn,
   openExactChat,
+  waitForChatContent,
 } from "./whatsapp/navigator.js";
+import { join } from "node:path";
 
 export interface AppDependencies {
   openSession: typeof openWhatsAppSession;
   ensureLogin: typeof ensureLoggedIn;
   openChat: typeof openExactChat;
+  waitForContent: typeof waitForChatContent;
   load: typeof loadHistory;
   createAdapter: typeof createPlaywrightHistoryAdapter;
   write: typeof writeExport;
@@ -47,6 +50,7 @@ const defaults: AppDependencies = {
   openSession: openWhatsAppSession,
   ensureLogin: ensureLoggedIn,
   openChat: openExactChat,
+  waitForContent: waitForChatContent,
   load: loadHistory,
   createAdapter: createPlaywrightHistoryAdapter,
   write: writeExport,
@@ -64,6 +68,13 @@ function extractionTimestamp(date: Date): string {
     .toISOString()
     .slice(0, 19);
   return `${local}${sign}${hours}:${minutes}`;
+}
+
+function mediaDirectory(chat: string): string {
+  const safe = Array.from(chat.normalize("NFKC").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").trim() || "chat")
+    .slice(0, 80)
+    .join("");
+  return join("exports", "media", safe);
 }
 
 function operationalFailure(
@@ -177,7 +188,10 @@ export async function runCommand(
     await controller.waitFor(dependencies.ensureLogin(session.page));
     if (command.kind === "scrape") {
       stage = "chat-navigation";
-      await controller.waitFor(dependencies.openChat(session.page, command.chat));
+      await controller.waitFor(dependencies.openChat(session.page, command.chat, {
+        searchTimeoutMs: 5_000,
+        headerTimeoutMs: 5_000,
+      }));
       stage = "history-loading";
       const now = dependencies.now();
       const adapter = dependencies.createAdapter(
@@ -185,8 +199,16 @@ export async function runCommand(
         command.chat,
         command.limit,
         now,
+        { mediaDirectory: mediaDirectory(command.chat) },
       );
-      const history = await controller.waitFor(dependencies.load(adapter));
+      const contentState = await controller.waitFor(dependencies.waitForContent(session.page));
+      const history = contentState === "unavailable"
+        ? {
+            messages: [],
+            complete: false,
+            warnings: ["No message history is available in this linked WhatsApp Web instance."],
+          }
+        : await controller.waitFor(dependencies.load(adapter));
       stage = "export";
       const result: ExtractionResult = {
         chat: command.chat,
@@ -230,4 +252,102 @@ export async function runCommand(
 
   if (primaryFailure !== undefined) throw primaryFailure;
   return output;
+}
+
+export interface BatchScrapeResult {
+  chat: string;
+  outcome?: CommandOutcome;
+  failure?: OperationalFailure;
+}
+
+type ScrapeCommand = Extract<CliCommand, { kind: "scrape" }>;
+
+export async function runBatchScrapes(
+  commands: readonly ScrapeCommand[],
+  overrides: Partial<AppDependencies> = {},
+): Promise<BatchScrapeResult[]> {
+  const dependencies: AppDependencies = { ...defaults, ...overrides };
+  let session: WhatsAppSession;
+  try {
+    session = await dependencies.openSession({ headed: true });
+  } catch (error) {
+    throw operationalFailure("session", error);
+  }
+  const controller = createRunController(session, dependencies.registerSignal);
+  const results: BatchScrapeResult[] = [];
+  let terminalFailure: OperationalFailure | undefined;
+  try {
+    await controller.waitFor(dependencies.ensureLogin(session.page));
+    for (const command of commands) {
+      let stage: "chat-navigation" | "history-loading" | "export" = "chat-navigation";
+      try {
+        await controller.waitFor(dependencies.openChat(session.page, command.chat, {
+          searchTimeoutMs: 5_000,
+          headerTimeoutMs: 5_000,
+        }));
+        stage = "history-loading";
+        const now = dependencies.now();
+        const adapter = dependencies.createAdapter(
+          session.page,
+          command.chat,
+          command.limit,
+          now,
+          { mediaDirectory: mediaDirectory(command.chat) },
+        );
+        const contentState = await controller.waitFor(dependencies.waitForContent(session.page));
+        const history = contentState === "unavailable"
+          ? {
+              messages: [],
+              complete: false,
+              warnings: ["No message history is available in this linked WhatsApp Web instance."],
+            }
+          : await controller.waitFor(dependencies.load(adapter));
+        stage = "export";
+        const extraction: ExtractionResult = {
+          chat: command.chat,
+          extractedAt: extractionTimestamp(now),
+          request: command.limit,
+          complete: history.complete,
+          warnings: history.warnings,
+          messages: history.messages,
+        };
+        const outcome: CommandOutcome = {
+          path: await controller.waitFor(dependencies.write(extraction, command.format)),
+          complete: history.complete,
+          warnings: sanitizeOutcomeWarnings(history.complete, history.warnings),
+        };
+        results.push({ chat: command.chat, outcome });
+      } catch (error) {
+        const failure = operationalFailure(stage, error);
+        if (failure.kind === "interrupted" || controller.interruptedSignal() !== undefined) {
+          terminalFailure = new OperationalFailure("interrupted", controller.interruptedSignal() ?? failure.signal);
+          break;
+        }
+        if (stage === "chat-navigation" || stage === "history-loading") {
+          try {
+            await controller.waitFor(dependencies.diagnose(
+              session.page,
+              stage,
+              command.diagnostics,
+            ));
+          } catch {
+            // Per-chat diagnostics remain best-effort in a continuing batch.
+          }
+        }
+        results.push({ chat: command.chat, failure });
+      }
+    }
+  } catch (error) {
+    terminalFailure = operationalFailure("login", error);
+  }
+
+  await controller.close();
+  await controller.drain();
+  controller.dispose();
+  if (controller.closeFailure() !== undefined) throw new OperationalFailure("shutdown-failure");
+  if (controller.interruptedSignal() !== undefined) {
+    throw new OperationalFailure("interrupted", controller.interruptedSignal());
+  }
+  if (terminalFailure !== undefined) throw terminalFailure;
+  return results;
 }

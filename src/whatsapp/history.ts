@@ -259,6 +259,7 @@ export function createPlaywrightHistoryAdapter(
   chat: string,
   limit: ScrapeLimit,
   now: Date,
+  options: { mediaDirectory?: string } = {},
 ): HistoryAdapter {
   return {
     limit,
@@ -266,7 +267,7 @@ export function createPlaywrightHistoryAdapter(
     maxCycles: 500,
     stallCycles: 3,
     verifySelectedChat: () => assertExactChatHeader(page, chat),
-    parseWindow: () => parseRenderedMessages(page, chat),
+    parseWindow: () => parseRenderedMessages(page, chat, options),
     async scrollOlder(): Promise<ScrollResult> {
       const container = await firstVisibleContainer(page);
       if (container === null) {
